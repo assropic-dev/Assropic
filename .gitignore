@@ -1,0 +1,11 @@
+# macOS / exFAT 附带文件
+.DS_Store
+._*
+__MACOSX/
+
+# 构建产物
+outputs/BridgeDock.app/
+outputs/*.zip
+
+# 调研与测试临时目录
+work/
