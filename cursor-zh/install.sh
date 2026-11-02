@@ -13,15 +13,21 @@ PACK_INTEGRITY="sha512-8fymZ7MyQ8rJNMcpmmZa5nPykhrMSwbFSx/7eeiSs8KVdZEf7PIVOydBg
 if pgrep -f "$CONTENTS/MacOS/Cursor" >/dev/null; then
   echo "请先按 Cmd+Q 完全退出 Cursor。" >&2; exit 1
 fi
+# 另一个补丁也改这几个文件，并且各自按文件校验值做恢复。两个叠在一起，
+# 任何一方恢复都会弄坏另一方，所以检测到就停下，不碰文件。
+if grep -q "__bridgeDockLocal" "$CONTENTS/Resources/app/out/vs/workbench/workbench.glass.main.js"; then
+  echo "Cursor 上装着另一个程序补丁，汉化补丁不能和它叠加。请先恢复那个补丁。" >&2; exit 2
+fi
 
-# 语言包放在本机临时目录运行；U 盘只存下载好的原包。
-mkdir -p vendor
+# 语言包放在本机临时目录运行；这里只存下载好的原包。
+# 从 BridgeDock.app 里运行时原包已经打包进去，不往 App 里写文件。
+WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 TGZ="vendor/cursor-language-pack-$PACK_VERSION.tgz"
 if [ ! -f "$TGZ" ]; then
+  case "$PWD" in *.app/*) TGZ="$WORK/pack.tgz" ;; *) mkdir -p vendor ;; esac
   curl -fsSL "https://registry.npmjs.org/@polang233/cursor-language-pack/-/cursor-language-pack-$PACK_VERSION.tgz" -o "$TGZ"
 fi
 [ "sha512-$(openssl dgst -sha512 -binary "$TGZ" | base64)" = "$PACK_INTEGRITY" ] || { echo "语言包校验失败" >&2; exit 1; }
-WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 tar xzf "$TGZ" -C "$WORK"
 PACK="$WORK/package"
 
@@ -30,6 +36,15 @@ ELECTRON_RUN_AS_NODE=1 "$NODE" extra.mjs --undo --dir="$CONTENTS"
 
 if [ "${1:-}" = "restore" ]; then
   ELECTRON_RUN_AS_NODE=1 "$NODE" "$PACK/bin/cli.mjs" restore --dir="$CONTENTS"
+  # 语言包的 restore 不改显示语言；把它设回英文，VS Code 部分也回到原版。
+  ARGV="$HOME/.cursor/argv.json"
+  if [ -f "$ARGV" ]; then
+    ELECTRON_RUN_AS_NODE=1 "$NODE" -e '
+const fs=require("fs");const f=process.argv[1];const t=fs.readFileSync(f,"utf8");
+const n=t.replace(/("locale"\s*:\s*")[^"]*(")/,"$1en$2");
+if(n!==t){fs.writeFileSync(f,n);console.log("+ 显示语言已设为 en");}
+' "$ARGV"
+  fi
   exit 0
 fi
 
