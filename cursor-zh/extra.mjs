@@ -48,11 +48,37 @@ const product = path.join(appRoot, 'product.json');
 let productText = fs.readFileSync(product, 'utf8');
 const touched = new Set();
 let failed = false;
+const FILES = ['workbench.glass.main.js'];
+// 改之前的文件存在这里。语言包只认它自己写出的版本，重装或恢复前要先还原成那个版本。
+const backupDir = path.join(process.env.HOME, 'Library', 'Application Support', 'BridgeDock', 'cursor-zh-backup');
 
-for (const name of ['workbench.glass.main.js']) {
+if (process.argv.includes('--undo')) {
+  for (const name of FILES) {
+    const file = path.join(appRoot, 'out', 'vs', 'workbench', name);
+    const text = fs.readFileSync(file, 'utf8');
+    if (!text.includes(MARK)) continue;
+    const backup = path.join(backupDir, name);
+    let before;
+    if (fs.existsSync(backup)) before = fs.readFileSync(backup, 'utf8');
+    else {
+      // 没有备份时按改动规则反推：去掉末尾的翻译器，还原两个常量。
+      before = text.slice(0, text.indexOf(`\n;${MARK}`))
+        .replace(new RegExp(`([,{;\\s(][A-Za-z_$][\\w$]*)=${JSON.stringify(extra.literals['No-repo Automations'])}(?=[,;}])`, 'g'), '$1="No-repo Automations"')
+        .replace(new RegExp(`([,{;\\s(][A-Za-z_$][\\w$]*)=${JSON.stringify(extra.literals['No Repo'])}(?=[,;}])`, 'g'), '$1="No Repo"');
+    }
+    fs.writeFileSync(file, before);
+    fs.rmSync(backup, { force: true });
+    touched.add(`vs/workbench/${name}`);
+    console.log(`- ${name} 已去掉补充改动`);
+  }
+}
+
+for (const name of process.argv.includes('--undo') ? [] : FILES) {
   const file = path.join(appRoot, 'out', 'vs', 'workbench', name);
   let text = fs.readFileSync(file, 'utf8');
   if (text.includes(MARK)) { console.log(`= ${name} 已补过，跳过`); continue; }
+  fs.mkdirSync(backupDir, { recursive: true });
+  fs.writeFileSync(path.join(backupDir, name), text);
   for (const [target, re, replacement, min] of literalRules) {
     if (target !== name) continue;
     const hits = (text.match(re) || []).length;
@@ -73,5 +99,5 @@ for (const key of touched) {
   if (!re.test(productText)) continue;
   productText = productText.replace(re, (_, a, __, c) => `${a}${checksum(fs.readFileSync(file))}${c}`);
 }
-if (touched.size) { fs.writeFileSync(product, productText); console.log('+ 安装校验已更新'); }
+if (touched.size) { fs.writeFileSync(product, productText); console.log('= 安装校验已更新'); }
 process.exitCode = failed ? 1 : 0;

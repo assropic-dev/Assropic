@@ -25,6 +25,9 @@ WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 tar xzf "$TGZ" -C "$WORK"
 PACK="$WORK/package"
 
+# 先撤掉 extra.mjs 的改动，语言包才认得自己写过的文件。
+ELECTRON_RUN_AS_NODE=1 "$NODE" extra.mjs --undo --dir="$CONTENTS"
+
 if [ "${1:-}" = "restore" ]; then
   ELECTRON_RUN_AS_NODE=1 "$NODE" "$PACK/bin/cli.mjs" restore --dir="$CONTENTS"
   exit 0
