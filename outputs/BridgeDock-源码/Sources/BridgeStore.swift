@@ -24,6 +24,7 @@ final class BridgeStore: ObservableObject {
     private var outputHandle: FileHandle?
     private var loginTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
+    private var exitTask: Task<Void, Never>?
     private var validState = true
     private var shuttingDown = false
     private let session: URLSession
@@ -98,6 +99,10 @@ final class BridgeStore: ObservableObject {
         shuttingDown = false
         status = "正在启动反代内核"
         defer { busy = false }
+        // Let a core that is still shutting down release the port first, so we
+        // never reconnect to a dying server.
+        await exitTask?.value
+        exitTask = nil
         do {
             // A previous app crash can leave its child alive. Only reconnect to a
             // server authenticated with this installation's private management key.
@@ -151,18 +156,24 @@ final class BridgeStore: ObservableObject {
         } catch { status = "启动失败"; report(error) }
     }
 
-    func stop() {
+    /// Stops the core. The UI path waits for exit on a background task so the
+    /// window never freezes; app termination passes `waitForExit` because the
+    /// process must be gone before the app exits.
+    func stop(waitForExit: Bool = false) {
         shuttingDown = true
         refreshTask?.cancel()
         loginTask?.cancel()
         login = nil
+        var target: (pid: pid_t, forceKill: Bool)?
         if let core, core.isRunning {
             core.terminate()
-            let deadline = Date().addingTimeInterval(2)
-            while core.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
-            if core.isRunning { kill(core.processIdentifier, SIGKILL) }
-        } else {
-            stopOrphan()
+            target = (core.processIdentifier, true)
+        } else if let pid = stopOrphan() {
+            target = (pid, false)
+        }
+        if let target {
+            if waitForExit { Self.awaitExit(target.pid, forceKill: target.forceKill) }
+            else { exitTask = Task.detached { Self.awaitExit(target.pid, forceKill: target.forceKill) } }
         }
         core = nil
         try? outputHandle?.close()
@@ -172,26 +183,32 @@ final class BridgeStore: ObservableObject {
         record("反代已停止")
     }
 
-    private func stopOrphan() {
+    /// Waits up to 2 seconds for `pid` to exit, then SIGKILLs it if allowed.
+    nonisolated private static func awaitExit(_ pid: pid_t, forceKill: Bool) {
+        let deadline = Date().addingTimeInterval(2)
+        while kill(pid, 0) == 0 && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
+        if forceKill && kill(pid, 0) == 0 { kill(pid, SIGKILL) }
+    }
+
+    /// Sends SIGTERM to a core left by a crashed app and returns its pid.
+    private func stopOrphan() -> pid_t? {
         let url = dataDirectory.appendingPathComponent("process.json")
         guard let data = try? Data(contentsOf: url),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let pid = object["pid"] as? Int32, pid > 1,
-              let path = object["executable"] as? String else { return }
+              let path = object["executable"] as? String else { return nil }
         let check = Process()
         check.executableURL = URL(fileURLWithPath: "/bin/ps")
         check.arguments = ["-p", String(pid), "-o", "comm="]
         let pipe = Pipe()
         check.standardOutput = pipe
         check.standardError = FileHandle.nullDevice
-        guard (try? check.run()) != nil else { return }
+        guard (try? check.run()) != nil else { return nil }
         let actual = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
         check.waitUntilExit()
-        if actual == path && path == coreURL.path {
-            kill(pid, SIGTERM)
-            let deadline = Date().addingTimeInterval(2)
-            while kill(pid, 0) == 0 && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
-        }
+        guard actual == path && path == coreURL.path else { return nil }
+        kill(pid, SIGTERM)
+        return pid
     }
 
     func request(_ path: String, method: String = "GET", body: Data? = nil,

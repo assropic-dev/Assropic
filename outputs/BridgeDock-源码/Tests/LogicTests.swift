@@ -33,6 +33,15 @@ struct LogicTests {
         bad = channel; bad.modelLines = ""
         rejects("empty models") { _ = try bad.validated() }
 
+        // An older state.json without newer fields must still load.
+        let oldState = Data(#"{"port":18500,"clientKey":"bd-old","managementKey":"m-old","channels":[{"name":"Old","baseURL":"https://x.example","apiKey":"k","prefix":"old","modelLines":"a"}]}"#.utf8)
+        let loaded = try JSONDecoder().decode(AppSettings.self, from: oldState)
+        check(loaded.port == 18500 && loaded.clientKey == "bd-old", "old state keeps saved values")
+        check(loaded.kiroRegion == "us-east-1" && loaded.selectedModels.isEmpty, "old state gets new defaults")
+        check(loaded.channels.first?.enabled == true && loaded.channels.first?.wire == .chat, "old channel gets defaults")
+        let roundTrip = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(loaded))
+        check(roundTrip.channels == loaded.channels && roundTrip.managementKey == "m-old", "state round trip")
+
         let claude = ConnectionProfile(tool: .claude, baseURL: "http://127.0.0.1:19417", key: "local-key", model: "mock/test-model")
         let existing = Data(#"{"env":{"OTHER":"preserve","ANTHROPIC_API_KEY":"old"},"permissions":{"allow":["Read"]},"custom":{"nested":true}}"#.utf8)
         let merged = try JSONSerialization.jsonObject(with: claude.merged(with: existing)) as! [String: Any]

@@ -5,7 +5,7 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var store: BridgeStore?
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
-    func applicationWillTerminate(_ notification: Notification) { store?.stop() }
+    func applicationWillTerminate(_ notification: Notification) { store?.stop(waitForExit: true) }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag { sender.windows.first { $0.canBecomeMain }?.makeKeyAndOrderFront(nil) }
         return true

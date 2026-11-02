@@ -134,6 +134,41 @@ struct AppSettings: Codable {
     }
 }
 
+// Missing fields fall back to defaults, so a state.json written by an older
+// version still loads after new settings are added.
+extension Channel {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = Channel()
+        id = try c.decodeIfPresent(String.self, forKey: .id) ?? d.id
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? d.name
+        kind = try c.decodeIfPresent(String.self, forKey: .kind) ?? d.kind
+        wire = try c.decodeIfPresent(WireProtocol.self, forKey: .wire) ?? d.wire
+        baseURL = try c.decodeIfPresent(String.self, forKey: .baseURL) ?? d.baseURL
+        apiKey = try c.decodeIfPresent(String.self, forKey: .apiKey) ?? d.apiKey
+        prefix = try c.decodeIfPresent(String.self, forKey: .prefix) ?? d.prefix
+        modelLines = try c.decodeIfPresent(String.self, forKey: .modelLines) ?? d.modelLines
+        proxyURL = try c.decodeIfPresent(String.self, forKey: .proxyURL) ?? d.proxyURL
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? d.enabled
+    }
+}
+
+extension AppSettings {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = AppSettings()
+        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? d.version
+        port = try c.decodeIfPresent(Int.self, forKey: .port) ?? d.port
+        clientKey = try c.decodeIfPresent(String.self, forKey: .clientKey) ?? d.clientKey
+        managementKey = try c.decodeIfPresent(String.self, forKey: .managementKey) ?? d.managementKey
+        channels = try c.decodeIfPresent([Channel].self, forKey: .channels) ?? d.channels
+        proxyURL = try c.decodeIfPresent(String.self, forKey: .proxyURL) ?? d.proxyURL
+        kiroStartURL = try c.decodeIfPresent(String.self, forKey: .kiroStartURL) ?? d.kiroStartURL
+        kiroRegion = try c.decodeIfPresent(String.self, forKey: .kiroRegion) ?? d.kiroRegion
+        selectedModels = try c.decodeIfPresent([String: String].self, forKey: .selectedModels) ?? d.selectedModels
+    }
+}
+
 struct Account: Identifiable {
     let name: String
     let provider: String

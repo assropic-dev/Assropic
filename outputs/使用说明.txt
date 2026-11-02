@@ -68,7 +68,9 @@ backups 保存修改工具配置前的副本。removed-accounts 保存移除账�
 开发构建
 
 需要 macOS Xcode Command Line Tools，运行 ./build.sh。
-默认输出 ../BridgeDock.app，也可传入自定义 App 路径。
+默认输出 ../BridgeDock.app 和同目录的 BridgeDock-macOS-arm64.zip，也可传入自定义 App 路径。
+在本机磁盘临时目录完成签名和打包，U 盘上不会产生 ._ 附带文件。
+在受沙盒限制的终端中构建时，可加 SWIFT_EXTRA_FLAGS=-disable-sandbox。
 构建生成本地 ad-hoc 签名，未进行 Apple 开发者公证。
 Sources 为桌面应用源码，Vendor 内核及扩展保留各自 MIT 许可证。
 
