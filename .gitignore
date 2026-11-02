@@ -9,3 +9,6 @@ outputs/*.zip
 
 # 调研与测试临时目录
 work/
+
+# Cursor 汉化：下载的语言包原包
+cursor-zh/vendor/

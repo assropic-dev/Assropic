@@ -1,0 +1,19 @@
+{
+  "literals": {
+    "Plan, Build, / for skills, @ for context": "规划、构建，/ 调用技能，@ 添加上下文",
+    "No Repo": "无仓库",
+    "No-repo Automations": "无仓库自动化"
+  },
+  "runtime": {
+    "Deploy my prototype": "部署我的原型",
+    "Put a project on a shareable live link": "把项目发布成可分享的在线链接",
+    "Review my database": "检查我的数据库",
+    "Check schema, indexes, and risky access rules": "检查表结构、索引和有风险的访问规则",
+    "Start with a plan": "先做计划",
+    "Align on implementation before writing code": "写代码前先对齐实现方案",
+    "Debug an issue": "调试问题",
+    "Find root causes and fix tricky bugs": "找到根本原因，修复棘手的错误",
+    "Import your Claude Code conversations": "导入你的 Claude Code 对话",
+    "Sync your chats and continue them in Cursor": "同步你的对话，在 Cursor 里继续"
+  }
+}
