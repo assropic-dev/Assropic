@@ -1474,7 +1474,10 @@ struct ClientsView: View {
                 }
             }
     }
-    private func resetPath() { filePath = tool.file.map { FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent($0).path } ?? "" }
+    private func resetPath() {
+        filePath = tool.file.map { FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent($0).path } ?? ""
+        if tool == .kimi { context = String(BridgeStore.managedContextSize(at: URL(fileURLWithPath: filePath)) ?? 32768) }
+    }
     private func chooseFile() {
         let panel = NSOpenPanel(); panel.canChooseDirectories = false; panel.showsHiddenFiles = true
         if panel.runModal() == .OK, let url = panel.url { filePath = url.path }

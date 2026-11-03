@@ -104,7 +104,8 @@ final class BridgeStore: ObservableObject {
 
     func redacted(_ text: String) -> String {
         var result = text
-        let secrets = settings.channels.map(\.apiKey) + [settings.clientKey, settings.managementKey, settings.coreClientKey]
+        let proxies = (settings.channels.map(\.proxyURL) + [settings.proxyURL]).filter { $0.contains("@") }
+        let secrets = settings.channels.map(\.apiKey) + proxies + [settings.clientKey, settings.managementKey, settings.coreClientKey]
         for secret in secrets where !secret.isEmpty { result = result.replacingOccurrences(of: secret, with: "••••••") }
         return String(result.prefix(1000))
     }
@@ -343,7 +344,8 @@ final class BridgeStore: ObservableObject {
     }
 
     func saveChannel(_ channel: Channel) async throws {
-        let value = try channel.validated(channels: settings.channels, accounts: accounts)
+        let unchanged = settings.channels.first { $0.id == channel.id }?.prefix == channel.prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = try channel.validated(channels: settings.channels, accounts: unchanged ? [] : accounts)
         var next = settings
         if let index = next.channels.firstIndex(where: { $0.id == value.id }) { next.channels[index] = value }
         else { next.channels.append(value) }
@@ -418,7 +420,7 @@ final class BridgeStore: ObservableObject {
         for (tool, selected) in settings.selectedModels {
             if models.contains(where: { $0.id == selected }) { continue }
             let rawID = previous.first(where: { $0.publicID == selected })?.id ?? selected
-            settings.selectedModels[tool] = availableModels.first(where: { $0.id == rawID && $0.isEnabled })?.publicID ?? models.first?.id ?? ""
+            settings.selectedModels[tool] = availableModels.first(where: { $0.id == rawID && $0.isEnabled })?.publicID
         }
         modelGateway.update(port: settings.port, corePort: settings.corePort, clientKey: settings.clientKey,
                             coreKey: settings.coreClientKey, catalog: availableModels, coreModels: rawModels.map(\.id))

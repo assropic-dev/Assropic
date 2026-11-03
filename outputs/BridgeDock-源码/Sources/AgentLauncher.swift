@@ -110,7 +110,7 @@ extension BridgeStore {
         return URL(fileURLWithPath: path)
     }
 
-    nonisolated private static func managedContextSize(at url: URL) -> Int? {
+    nonisolated static func managedContextSize(at url: URL) -> Int? {
         guard let text = try? String(contentsOf: url, encoding: .utf8),
               let begin = text.range(of: "# BEGIN BRIDGEDOCK MANAGED"),
               let end = text.range(of: "# END BRIDGEDOCK MANAGED", range: begin.upperBound..<text.endIndex) else { return nil }
