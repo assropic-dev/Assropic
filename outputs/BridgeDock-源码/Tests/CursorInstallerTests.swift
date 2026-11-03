@@ -110,6 +110,28 @@ struct CursorInstallerTests {
         check(!installer.isInstalled(), "runtime change requires upgrade")
         try privateWrite(runtime, to: runtimeURL)
 
+        // Taking the adapter off returns exactly the localized pre-adapter sources, so
+        // the language pack can recognize and restore its own files afterwards.
+        try privateWrite(changes[translatedURL]!, to: translatedURL)
+        for file in manifest.files {
+            let current = try String(contentsOf: installer.targetURL(for: file), encoding: .utf8)
+            check(try installer.unadaptedSource(current, file: file) == String(decoding: originalSources[file.name]!, as: UTF8.self),
+                  "unadapted source equals the pre-adapter source for " + file.name)
+        }
+        try installer.removeAdapter()
+        check(try sources() == originalSources, "removing the adapter restores every patched file byte for byte")
+        check(!fm.fileExists(atPath: runtimeURL.path) && !installer.hasAdapterFiles, "removing the adapter deletes the runtime")
+        let unpatchedProduct = try JSONSerialization.jsonObject(with: Data(contentsOf: productURL)) as! [String: Any]
+        check(unpatchedProduct["translationMarker"] as? String == "keep", "removing the adapter keeps unrelated product fields")
+        for file in manifest.files where file.loadsRuntime {
+            let hash = Data(SHA256.hash(data: originalSources[file.name]!)).base64EncodedString().replacingOccurrences(of: "=", with: "")
+            check((unpatchedProduct["checksums"] as? [String: String])?["vs/workbench/" + file.name] == hash, "removing the adapter refreshes checksums")
+        }
+        rejects("an unknown injection cannot be unadapted") {
+            _ = try installer.unadaptedSource("import \"./bridgedock-local.js\";\nentry(){if(globalThis.__bridgeDockUnknown)return;}", file: manifest.files[0])
+        }
+        for (url, data) in changes { try privateWrite(data, to: url) }
+
         // Check exact legacy replacement migration and unknown/duplicate rejection.
         let singleData = Data(#"{"name":"test.js","patches":[{"find":"entry(){","replace":"entry(){if(globalThis.__bridgeDockNew)return;","previousReplacements":["entry(){if(globalThis.__bridgeDockOld)return;"]}]}"#.utf8)
         let single = try JSONDecoder().decode(CursorLocalInstaller.FilePatches.self, from: singleData)

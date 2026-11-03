@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import CryptoKit
 import SwiftUI
 
 /// Switches Cursor between the Chinese UI patch and the original UI.
@@ -39,12 +40,13 @@ final class CursorChinesePatch: ObservableObject {
         enabled = state.patched
         needsQuit = false
         if !state.found { status = "没有找到 /Applications/Cursor.app" }
-        else if state.other && !state.patched { status = "Cursor 上装着另一个程序补丁，汉化不能叠加" }
-        else { status = enabled ? "已开启 · Cursor 显示中文" : "已关闭 · Cursor 原版界面" }
+        else { status = (enabled ? "已开启 · Cursor 显示中文" : "已关闭 · Cursor 原版界面") + (state.other ? " · 与 BD 适配共存" : "") }
     }
 
-    func set(_ on: Bool) async {
-        guard !busy, on != enabled else { return }
+    /// The language pack restores whole files by hash, so the BD adapter is taken
+    /// off first and put back afterwards; neither patch ever restores over the other.
+    func set(_ on: Bool, store: BridgeStore) async {
+        guard !busy, !store.cursorBusy, on != enabled else { return }
         if runningCursor != nil {
             needsQuit = true
             status = "请先退出 Cursor，再切换"
@@ -55,15 +57,79 @@ final class CursorChinesePatch: ObservableObject {
             return
         }
         busy = true
+        store.cursorBusy = true
+        defer { busy = false; store.cursorBusy = false }
+        let installer = store.cursorInstaller
+        let reinstall = store.cursorIdentity.enabled
+        let identity = store.cursorIdentity
+        if installer.hasAdapterFiles {
+            status = "正在检查汉化记录…"
+            let app = self.app
+            let accepted = await Task.detached { Self.languagePackAccepts(installer, app: app) }.value
+            if let problem = accepted {
+                status = problem
+                return
+            }
+        }
+        if installer.hasAdapterFiles {
+            status = "正在暂时撤下 BD 适配…"
+            do { try await Task.detached { try installer.removeAdapter() }.value }
+            catch {
+                status = error.localizedDescription
+                return
+            }
+        }
         status = on ? "正在安装中文补丁…" : "正在恢复原版 Cursor…"
         let result = await Self.run(script: script, restore: !on)
-        busy = false
+        var adapterError: String?
+        if reinstall {
+            status = "正在装回 BD 适配…"
+            do { try await Task.detached { try installer.install(identity: identity) }.value }
+            catch { adapterError = error.localizedDescription }
+        }
+        store.cursorInstalled = await Task.detached { installer.isInstalled() }.value
         await refresh()
         if result.code != 0 {
             status = result.lastLine.isEmpty ? "切换失败（\(result.code)）" : result.lastLine
+        } else if let adapterError {
+            status = "汉化已切换，BD 适配未能装回 · " + adapterError
         } else if enabled == on {
             status += " · 重新打开 Cursor 生效"
         }
+    }
+
+    /// The language pack only installs over or restores files whose hash it recorded.
+    /// Check that taking the adapter off yields exactly those files before touching
+    /// anything; an older install made on top of a previous adapter cannot be switched.
+    nonisolated static func languagePackAccepts(_ installer: CursorLocalInstaller, app: URL) -> String? {
+        let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".cursor/cursor-language-pack/installs")
+        guard let product = try? JSONSerialization.jsonObject(with: Data(contentsOf: app.appendingPathComponent("Contents/Resources/app/product.json"))) as? [String: Any],
+              let version = product["version"] as? String else { return nil }
+        let records = (FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)?.allObjects as? [URL] ?? [])
+            .filter { $0.lastPathComponent == "rewrite.json" }
+            .compactMap { try? JSONSerialization.jsonObject(with: Data(contentsOf: $0)) as? [String: Any] }
+            .filter { record in
+                let root = (record["installRoot"] as? String).map { URL(fileURLWithPath: $0).standardizedFileURL.path }
+                return record["cursorVersion"] as? String == version
+                    && (root == nil || root == app.standardizedFileURL.path || root == app.appendingPathComponent("Contents").standardizedFileURL.path)
+            }
+        guard let record = records.first, let files = record["files"] as? [String: [String: Any]] else { return nil }
+        guard let unadapted = try? installer.unadaptedFiles() else { return "BD 适配无法可靠撤下，汉化保持不变。" }
+        let zhBackup = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/BridgeDock/cursor-zh-backup/workbench.glass.main.js")
+        func hex(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
+        for (path, entry) in files {
+            guard var data = unadapted[path] else { continue }
+            if path.hasSuffix("workbench.glass.main.js"), data.range(of: Data(marker.utf8)) != nil {
+                guard let backup = try? Data(contentsOf: zhBackup) else { return "缺少汉化补充改动的备份，无法自动切换。" }
+                data = backup
+            }
+            let known = ["patched", "original", "pendingFrom"].compactMap { entry[$0] as? String }
+            guard known.contains(hex(data)) else {
+                return "这台 Cursor 的汉化是在旧版 BD 适配之后装上的，语言包记录里含旧适配代码，无法自动切换。请重新安装 Cursor 3.27.22 后，先开汉化、再开 BD 反代。"
+            }
+        }
+        return nil
     }
 
     /// Asks Cursor to quit the normal way, so it can prompt for unsaved files.
@@ -100,6 +166,7 @@ private let zhMutedInk = Color(red: 0.45, green: 0.43, blue: 0.40)
 private let zhAccent = Color(red: 0.69, green: 0.32, blue: 0.22)
 
 struct CursorChineseCard: View {
+    @EnvironmentObject var store: BridgeStore
     @StateObject private var patch = CursorChinesePatch()
     var body: some View {
         Card {
@@ -109,8 +176,8 @@ struct CursorChineseCard: View {
                     Text("Cursor 中文界面").font(.system(size: 15, weight: .semibold))
                     Spacer()
                     if patch.busy { ProgressView().controlSize(.small) }
-                    Toggle("中文补丁", isOn: Binding(get: { patch.enabled }, set: { on in Task { await patch.set(on) } }))
-                        .toggleStyle(.switch).labelsHidden().disabled(patch.busy)
+                    Toggle("中文补丁", isOn: Binding(get: { patch.enabled }, set: { on in Task { await patch.set(on, store: store) } }))
+                        .toggleStyle(.switch).labelsHidden().disabled(patch.busy || store.cursorBusy)
                 }
                 Text("打开：Cursor 显示中文。关闭：恢复原版 Cursor。切换前要先退出 Cursor。")
                     .font(.system(size: 12)).foregroundStyle(zhMutedInk)

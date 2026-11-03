@@ -195,22 +195,39 @@ const original = {
     assert.equal(credentials.localLoopInferenceUrl, "old-loopback");
   }
 
-  // Advertised ceilings constrain the native dropdown. Extended reasoning
-  // values are preserved; unknown upstream metadata is not treated as a limit.
+  // Choices come from each model's published capabilities: the real window is the
+  // default context, smaller budgets sit below it, and only listed efforts appear.
   {
     const ctx = runtime({ ...session, modelParametersEnabled: true });
     const rows = ctx.__bridgeDockEnrichModels([{ name: "bd-model" }], [{
       id: "bd-model", capabilities: { context_length: 100000, reasoning_effort: ["minimal", "high", "ultra"] }
     }]);
     const definitions = rows[0].parameterDefinitions;
-    assert.deepEqual(clone(definitions[1].parameterType.enumParameter.values.map(item => item.value)), ["none", "minimal", "high", "ultra"]);
-    const sizes = definitions[0].parameterType.enumParameter.values.map(item => item.value);
-    assert.ok(sizes.includes("auto") && sizes.includes("100000"));
-    assert.ok(sizes.filter(item => item !== "auto").every(item => Number(item) <= 100000));
+    const reasoning = definitions.find(item => item.id === "reasoning");
+    assert.deepEqual(clone(reasoning.parameterType.enumParameter.values.map(item => item.value)), ["none", "minimal", "high", "ultra"]);
+    const sizes = definitions.find(item => item.id === "context").parameterType.enumParameter.values.map(item => item.value);
+    assert.equal(sizes.at(-1), "100000");
+    assert.ok(!sizes.includes("auto") && sizes.every(item => Number(item) <= 100000));
+    assert.equal(rows[0].contextTokenLimit, 100000);
+    assert.equal(rows[0].supportsThinking, true);
     assert.ok(rows[0].variants.some(item => item.parameterValues.some(param => param.value === "ultra")));
-    const unknown = ctx.__bridgeDockEnrichModels([{ name: "unknown-model", contextTokenLimit: 32000 }], []);
-    assert.ok(unknown[0].parameterDefinitions[0].parameterType.enumParameter.values.some(item => item.value === "2000000"));
-    assert.ok(unknown[0].parameterDefinitions[0].parameterType.enumParameter.values.some(item => item.value === "32768" && item.displayName === "32K"));
+    const defaults = rows[0].variants.filter(item => item.isDefaultNonMaxConfig);
+    assert.equal(defaults.length, 1);
+    assert.deepEqual(clone(defaults[0].parameterValues), [{ id: "context", value: "100000" }, { id: "reasoning", value: "none" }]);
+    const kimi = ctx.__bridgeDockEnrichModels([{ name: "kimi/k3" }], [{ id: "kimi/k3", context_length: 1048576,
+      capabilities: { context_length: 1048576, reasoning_effort: ["low", "high", "max"] } }]);
+    assert.deepEqual(clone(kimi[0].parameterDefinitions.find(item => item.id === "context").parameterType.enumParameter.values.map(item => item.displayName)),
+      ["200K", "256K", "512K", "1M"]);
+    // Unknown windows publish no limit and no invented choices; no efforts means no thinking.
+    const unknown = ctx.__bridgeDockEnrichModels([{ name: "unknown-model" }], []);
+    assert.deepEqual(clone(unknown[0].parameterDefinitions), []);
+    assert.equal(unknown[0].contextTokenLimit, undefined);
+    assert.equal(unknown[0].supportsThinking, false);
+    const plain = ctx.__bridgeDockEnrichModels([{ name: "plain" }], [{ id: "plain", capabilities: { context_length: 200000 } }]);
+    assert.deepEqual(clone(plain[0].parameterDefinitions.map(item => item.id)), ["context"]);
+    // The real window is published to Cursor even when parameter editing is off.
+    const off = local.__bridgeDockEnrichModels([{ name: "bd-model" }], [{ id: "bd-model", capabilities: { context_length: 100000 } }]);
+    assert.equal(off[0].contextTokenLimit, 100000);
     assert.equal(ctx.__bridgeDockParameterHeaders()["X-BridgeDock-Model-Parameters"], "1");
     assert.equal(local.__bridgeDockParameterHeaders()["X-BridgeDock-Model-Parameters"], "0");
     const unchanged = [{ name: "bd-model", parameterDefinitions: [] }];
@@ -230,7 +247,7 @@ const original = {
     const { service, state, storage } = makeService(original);
     service.fetchLocalProviderModelEnrichment = async () => ({
       pickerModels: [{ name: "bd-model" }], allProviderModelIds: ["bd-model"],
-      providerModelCatalog: [{ id: "bd-model", context_length: 128000 }]
+      providerModelCatalog: [{ id: "bd-model", capabilities: { context_length: 128000, reasoning_effort: ["low", "high"] } }]
     });
     await enabled.__bridgeDockRefreshModels(service, row => row);
     const parameters = [{ id: "context", value: "65536" }, { id: "reasoning", value: "high" }];

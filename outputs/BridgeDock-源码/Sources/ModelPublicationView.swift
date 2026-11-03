@@ -97,6 +97,8 @@ struct ModelPublicationView: View {
                                         Text(model.modelName).font(.system(size: 13, weight: .medium))
                                         Text(model.publicID).font(.system(size: 10, design: .monospaced))
                                             .foregroundStyle(mutedInk).textSelection(.enabled)
+                                        Text(ModelPublishing.capabilitySummary(model.capability))
+                                            .font(.system(size: 10)).foregroundStyle(mutedInk)
                                     }.padding(.vertical, 10).frame(maxWidth: .infinity, alignment: .leading)
                                 }.toggleStyle(.checkbox).padding(.horizontal, 16)
                                     .accessibilityIdentifier("publish-model-" + model.id)

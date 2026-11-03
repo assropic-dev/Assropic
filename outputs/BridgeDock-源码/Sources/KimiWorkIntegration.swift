@@ -60,6 +60,7 @@ extension BridgeStore {
             channel.balancePath = ""
             channel.enabled = true
             if !sameAccount || channel.modelLines.isEmpty { channel.modelLines = names.joined(separator: "\n") }
+            channel.capabilities = ModelListRequest.capabilities(in: payload)
             busy = false
             try await saveChannel(channel)
             kimiWorkStatus = "Work 已连接 · \(names.count) 个模型 · 前缀 \(channel.prefix) · 会员月度共享额度"
@@ -72,11 +73,15 @@ extension BridgeStore {
     }
 
     func kimiWorkModels(_ channel: Channel) async throws -> [String] {
+        try await kimiWorkCatalog(channel).0
+    }
+
+    func kimiWorkCatalog(_ channel: Channel) async throws -> ([String], [String: ModelCapability]) {
         let session = try KimiWorkSession.read(expectedAccountHash: channel.desktopAccountHash)
         let data = try await kimiWorkRequest(path: KimiWorkSession.baseURL + "/models", token: session.apiKey, proxy: channel.proxyURL)
         let names = ModelListRequest.names(in: data)
         guard !names.isEmpty else { throw BridgeError.message("Work 网关未返回模型列表。") }
-        return names
+        return (names, ModelListRequest.capabilities(in: data))
     }
 
     func kimiWorkQuota(_ channel: Channel) async throws -> [String: Any] {

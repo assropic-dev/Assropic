@@ -17,6 +17,11 @@ const contents = dirArg ? dirArg.slice(6) : '/Applications/Cursor.app/Contents';
 const appRoot = path.join(contents, 'Resources', 'app');
 const MARK = '/*BRIDGEDOCK-ZH-EXTRA*/';
 const extra = JSON.parse(fs.readFileSync(path.join(here, 'extra.zh-cn.json'), 'utf8'));
+const supplementDir = path.join(here, 'supplement');
+const supplement = {};
+for (const f of fs.readdirSync(supplementDir).filter((n) => n.endsWith('.json') && !n.startsWith('.')).sort()) {
+  Object.assign(supplement, JSON.parse(fs.readFileSync(path.join(supplementDir, f), 'utf8')));
+}
 
 // [文件, 原文正则, 替换, 至少命中次数]
 const literalRules = [
@@ -31,10 +36,13 @@ function checksum(buf) {
   return crypto.createHash('sha256').update(buf).digest('base64').replace(/=+$/, '');
 }
 
+// 编辑器、终端、对话内容和输入框里是用户自己的文字，运行时翻译器不进去。
+const SKIP = '.monaco-editor,.xterm,[contenteditable],textarea,input,pre,code,.ui-markdown,.markdown-section,.markdown-root,.composer-human-message,.rendered-markdown';
+
 function runtimeSnippet(dict) {
-  const body = `(()=>{const M=new Map(Object.entries(${JSON.stringify(dict)}));const A=["placeholder","title","aria-label"];` +
-    `const t=n=>{const v=n.nodeValue;if(!v)return;const k=v.trim();const z=M.get(k);if(z)n.nodeValue=v.replace(k,z)};` +
-    `const e=el=>{for(const a of A){const v=el.getAttribute&&el.getAttribute(a);if(v){const z=M.get(v.trim());if(z)el.setAttribute(a,z)}}};` +
+  const body = `(()=>{const M=new Map(Object.entries(${JSON.stringify(dict)}));const A=["placeholder","title","aria-label"];const S=${JSON.stringify(SKIP)};` +
+    `const t=n=>{const v=n.nodeValue;if(!v)return;const k=v.trim();const z=M.get(k);if(z&&!n.parentElement?.closest(S))n.nodeValue=v.replace(k,z)};` +
+    `const e=el=>{if(el.closest&&el.closest(S)&&!el.matches("input,textarea"))return;for(const a of A){const v=el.getAttribute&&el.getAttribute(a);if(v){const z=M.get(v.trim());if(z)el.setAttribute(a,z)}}};` +
     `const w=r=>{if(r.nodeType===3)return t(r);if(r.nodeType!==1)return;e(r);for(const el of r.querySelectorAll("[placeholder],[title],[aria-label]"))e(el);` +
     `const tw=document.createTreeWalker(r,NodeFilter.SHOW_TEXT);let n;while(n=tw.nextNode())t(n)};` +
     `const s=()=>{w(document.body);new MutationObserver(ms=>{for(const m of ms){if(m.type==="characterData")t(m.target);` +
@@ -87,10 +95,16 @@ for (const name of process.argv.includes('--undo') ? [] : FILES) {
     text = text.replace(re, replacement);
     console.log(`+ ${name} 替换 ${hits} 处：${re.source.slice(0, 40)}`);
   }
-  text += runtimeSnippet(extra.runtime);
+  // 语言包只换固定字段里的文字。补充译文里仍以英文留在程序里的整句，交给运行时
+  // 按整段文字精确匹配翻译；只包含至少两个词的句子，避免误换按钮 ID 一类的短词。
+  const leftovers = {};
+  for (const [k, v] of Object.entries(supplement)) {
+    if (v && v !== k && /\s/.test(k.trim()) && text.includes(JSON.stringify(k))) leftovers[k] = v;
+  }
+  text += runtimeSnippet({ ...leftovers, ...extra.runtime });
   fs.writeFileSync(file, text);
   touched.add(`vs/workbench/${name}`);
-  console.log(`+ ${name} 加入首页卡片翻译（${Object.keys(extra.runtime).length} 条）`);
+  console.log(`+ ${name} 加入运行时翻译（首页卡片 ${Object.keys(extra.runtime).length} 条，补充译文 ${Object.keys(leftovers).length} 条）`);
 }
 
 for (const key of touched) {

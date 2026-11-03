@@ -179,40 +179,65 @@ globalThis.__bridgeDockPickerLayout = function (props) {
     menuMaxHeight: Math.max(180, Math.min(500, (globalThis.innerHeight || 800) - 100)) };
 };
 
-// Use Cursor's existing parameter picker and its normal parameter persistence.
-// A context value is a client prompt budget; it cannot expand upstream limits.
+// BridgeDock publishes each model's real context window and reasoning levels in
+// /v1/models (capabilities.context_length / reasoning_effort). Cursor's local runtime
+// reads the same fields for the remaining-context ring; the picker offers only
+// values the model actually supports.
+const effortLabels = { none: "关闭", minimal: "极低", low: "低", medium: "中", high: "高", xhigh: "超高", "extra-high": "超高", max: "最高", ultra: "极深" };
+const tokenLabel = value => {
+  if (value % 1048576 === 0) return `${value / 1048576}M`;
+  if (value % 1000000 === 0) return `${value / 1000000}M`;
+  if (value % 1024 === 0 && value < 1048576) return `${value / 1024}K`;
+  return value >= 1000000 ? `${(value / 1000000).toFixed(1)}M` : `${Math.round(value / 1000)}K`;
+};
+
+function modelCapability(metadata) {
+  const capabilities = metadata?.capabilities ?? {};
+  const limit = Number(capabilities.context_length ?? metadata?.context_length);
+  const efforts = Array.isArray(capabilities.reasoning_effort) ? capabilities.reasoning_effort
+    .filter(value => typeof value === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(value) && value !== "none") : [];
+  return { limit: Number.isSafeInteger(limit) && limit > 0 ? limit : undefined, efforts: [...new Set(efforts)] };
+}
+
+// Budgets below the real window let a long conversation be summarized earlier.
+// Without a published window there is nothing truthful to offer.
+function contextChoices(limit) {
+  if (!limit) return [];
+  const steps = [32768, 65536, 131072, 200000, 262144, 524288, 1000000, 2000000];
+  const below = steps.filter(value => value < limit * 0.9 && value >= Math.min(32768, limit / 8));
+  return [...below.slice(-3), limit];
+}
+
 globalThis.__bridgeDockEnrichModels = function (rows, catalog) {
   rows = organizeModels(rows, catalog);
-  if (!globalThis.__bridgeDockLocal?.modelParametersEnabled) return rows;
   const entries = Array.isArray(catalog) ? catalog : catalog?.data ?? [];
-  const labels = { none: "默认", minimal: "极低", low: "低", medium: "中", high: "高", xhigh: "超高", "extra-high": "超高", max: "最高", ultra: "极深" };
-  const tokenLabel = value => value >= 1000000 ? `${value / 1000000}M` : `${value <= 65536 && value % 1024 === 0 ? value / 1024 : Math.round(value / 1000)}K`;
+  const parametersEnabled = !!globalThis.__bridgeDockLocal?.modelParametersEnabled;
   return rows.map(row => {
-    const metadata = entries.find(entry => entry.id === row.name) ?? {};
-    const capabilities = metadata.capabilities ?? {};
-    const advertisedLimit = Number(capabilities.context_length ?? metadata.context_length);
-    const hasLimit = Number.isSafeInteger(advertisedLimit) && advertisedLimit > 0;
-    const maximum = hasLimit ? advertisedLimit : 2000000;
-    const sizes = [...new Set([8192, 16384, 32768, 65536, 128000, 200000, 256000, 512000, 1000000, 2000000,
-      ...(hasLimit ? [maximum] : [])])].filter(value => value <= maximum).sort((a, b) => a - b);
-    const advertisedEfforts = capabilities.reasoning_effort;
-    const efforts = ["none", ...new Set((Array.isArray(advertisedEfforts) && advertisedEfforts.length
-      ? advertisedEfforts : ["low", "medium", "high"]).filter(value => typeof value === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(value) && value !== "none"))];
-    const contexts = ["auto", ...sizes.map(String)];
+    const { limit, efforts } = modelCapability(entries.find(entry => entry.id === row.name));
+    const base = { ...row, ...(limit ? { contextTokenLimit: limit } : {}), supportsThinking: efforts.length > 0,
+      supportsNonMaxMode: true, supportsMaxMode: false };
+    if (!parametersEnabled) return base;
+    const contexts = contextChoices(limit);
+    const reasoning = efforts.length ? ["none", ...efforts] : [];
     const parameterDefinitions = [
-      { id: "context", name: "上下文预算", markdownTooltip: "用于 Cursor 本地上下文预算。默认跟随渠道；手动值不能扩大上游模型真实上限。",
-        parameterType: { enumParameter: { values: contexts.map(value => ({ value, displayName: value === "auto" ? "默认" : tokenLabel(Number(value)) })) } } },
-      { id: "reasoning", name: "思考深度", markdownTooltip: "默认不覆盖渠道参数。手动值将发送给上游；是否支持以渠道响应为准。",
-        parameterType: { enumParameter: { values: efforts.map(value => ({ value, displayName: labels[value] ?? value })) } } }
+      ...(contexts.length > 1 ? [{ id: "context", name: "上下文",
+        markdownTooltip: `模型上下文上限 ${tokenLabel(limit)}。选较小的值会更早压缩对话。`,
+        parameterType: { enumParameter: { values: contexts.map(value => ({ value: String(value), displayName: tokenLabel(value) })) } } }] : []),
+      ...(reasoning.length ? [{ id: "reasoning", name: "思考强度", isCycleableByHotkey: true,
+        markdownTooltip: "选项来自模型资料。“关闭”不发送思考参数，使用渠道默认。",
+        parameterType: { enumParameter: { values: reasoning.map(value => ({ value, displayName: effortLabels[value] ?? value })) } } }] : [])
     ];
-    const variants = contexts.flatMap(context => efforts.map(reasoning => {
-      return { parameterValues: [{ id: "context", value: context }, { id: "reasoning", value: reasoning }],
+    if (!parameterDefinitions.length) return { ...base, parameterDefinitions: [], variants: [] };
+    const contextValues = contexts.length > 1 ? contexts.map(String) : [undefined];
+    const reasoningValues = reasoning.length ? reasoning : [undefined];
+    const variants = contextValues.flatMap(context => reasoningValues.map(effort => {
+      const isDefault = (context === undefined || context === String(limit)) && (effort === undefined || effort === "none");
+      return { parameterValues: [...(context !== undefined ? [{ id: "context", value: context }] : []),
+        ...(effort !== undefined ? [{ id: "reasoning", value: effort }] : [])],
         displayName: row.name, displayNameOutsidePicker: row.name,
-        isMaxMode: false, isDefaultNonMaxConfig: context === "auto" && reasoning === "none",
-        isDefaultMaxConfig: context === "auto" && reasoning === "none" };
+        isMaxMode: false, isDefaultNonMaxConfig: isDefault, isDefaultMaxConfig: isDefault };
     }));
-    return { ...row, parameterDefinitions, variants, supportsThinking: true, supportsNonMaxMode: true,
-      supportsMaxMode: false, ...(hasLimit ? { contextTokenLimit: maximum } : {}) };
+    return { ...base, parameterDefinitions, variants };
   });
 };
 

@@ -13,10 +13,10 @@ PACK_INTEGRITY="sha512-8fymZ7MyQ8rJNMcpmmZa5nPykhrMSwbFSx/7eeiSs8KVdZEf7PIVOydBg
 if pgrep -f "$CONTENTS/MacOS/Cursor" >/dev/null; then
   echo "请先按 Cmd+Q 完全退出 Cursor。" >&2; exit 1
 fi
-# 另一个补丁也改这几个文件，并且各自按文件校验值做恢复。两个叠在一起，
-# 任何一方恢复都会弄坏另一方，所以检测到就停下，不碰文件。
+# BD 适配也改这几个文件，语言包按文件校验值恢复。BridgeDock 切换汉化时会先撤下
+# BD 适配、完成后再装回；单独运行本脚本时检测到适配就停下，不碰文件。
 if grep -q "__bridgeDockLocal" "$CONTENTS/Resources/app/out/vs/workbench/workbench.glass.main.js"; then
-  echo "Cursor 上装着另一个程序补丁，汉化补丁不能和它叠加。请先恢复那个补丁。" >&2; exit 2
+  echo "Cursor 上装着 BD 适配，请在 BridgeDock 的 Cursor 中文界面开关里切换。" >&2; exit 2
 fi
 
 # 语言包放在本机临时目录运行；这里只存下载好的原包。

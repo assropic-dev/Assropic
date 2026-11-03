@@ -12,6 +12,11 @@ final class BridgeStore: ObservableObject {
     @Published var models: [ModelItem] = []
     @Published var availableModels: [PublishedModel] = []
     private var rawModels: [ModelItem] = []
+    private var modelDefinitions: [String: [String: ModelCapability]] = [:]
+    private var modelDefinitionKey = ""
+    private var modelDefinitionsLoadedAt = Date.distantPast
+    var modelOwners: [String] { Array(Set(rawModels.map(\.owner))) }
+    var capabilityBackfillAttempted: Set<String> = []
     private let modelGateway = ModelGateway()
     @Published var accounts: [Account] = []
     @Published var activities: [Activity] = []
@@ -401,6 +406,14 @@ final class BridgeStore: ObservableObject {
             }
             accounts = rows.map(Account.init)
                 .filter { !["api-key", "apikey"].contains($0.provider) }
+            // Plugin vendors register their definitions after startup; retry missing sets.
+            let definitionKey = Set(accounts.map(\.provider) + modelOwners).sorted().joined(separator: ",")
+            let incomplete = !Self.expectedDefinitionSets(accounts, owners: modelOwners).isSubset(of: Set(modelDefinitions.keys))
+            if definitionKey != modelDefinitionKey || (incomplete && Date().timeIntervalSince(modelDefinitionsLoadedAt) > 30) {
+                modelDefinitions = await loadModelDefinitions()
+                modelDefinitionKey = definitionKey
+                modelDefinitionsLoadedAt = Date()
+            }
             refreshPublishedCatalog()
             status = "本地服务运行中"
             if cursorIdentity.enabled {
@@ -408,6 +421,7 @@ final class BridgeStore: ObservableObject {
                                          model: settings.selectedModels["Cursor"] ?? models.first?.id ?? "")
             }
             Task { await self.refreshQuotas() }
+            Task { await self.backfillChannelCapabilities() }
         } catch {
             status = "本地连接异常，请检查服务"
         }
@@ -415,7 +429,7 @@ final class BridgeStore: ObservableObject {
 
     private func refreshPublishedCatalog() {
         let previous = availableModels
-        availableModels = ModelPublishing.catalog(rawModels: rawModels, settings: settings, accounts: accounts)
+        availableModels = ModelPublishing.catalog(rawModels: rawModels, settings: settings, accounts: accounts, definitions: modelDefinitions)
         models = availableModels.filter(\.isEnabled).map { ModelItem(id: $0.publicID, owner: $0.sourceName) }
         for (tool, selected) in settings.selectedModels {
             if models.contains(where: { $0.id == selected }) { continue }

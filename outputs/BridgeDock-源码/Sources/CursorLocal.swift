@@ -339,6 +339,75 @@ struct CursorLocalInstaller {
         return (file.loadsRuntime ? marker : "") + (content as String)
     }
 
+    var hasAdapterFiles: Bool {
+        FileManager.default.fileExists(atPath: workbench.appendingPathComponent("bridgedock-local.js").path)
+    }
+
+    /// Exact inverse of `adaptedSource`: every injected string maps back to its
+    /// original text, so bytes written by other patches are left untouched.
+    func unadaptedSource(_ source: String, file: FilePatches) throws -> String {
+        func incompatible() -> BridgeError {
+            BridgeError.message("Cursor \(file.name) 中的 BD 适配无法可靠撤下，已保留原文件。")
+        }
+        let content = NSMutableString(string: source)
+        if file.loadsRuntime {
+            guard source.hasPrefix(marker) else { throw incompatible() }
+            content.deleteCharacters(in: NSRange(location: 0, length: (marker as NSString).length))
+        }
+        for patch in file.patches.reversed() {
+            let candidates = [patch.replace] + (patch.previousReplacements ?? [])
+            guard let matched = candidates.first(where: { content.range(of: $0, options: .literal).location != NSNotFound }) else { throw incompatible() }
+            let range = content.range(of: matched, options: .literal)
+            let after = NSRange(location: NSMaxRange(range), length: content.length - NSMaxRange(range))
+            guard content.range(of: matched, options: .literal, range: after).location == NSNotFound else { throw incompatible() }
+            content.replaceCharacters(in: range, with: patch.find)
+        }
+        let result = content as String
+        guard !result.contains("__bridgeDock"), !result.contains("bridgedock-local.js") else { throw incompatible() }
+        return result
+    }
+
+    /// In-memory result of `removeAdapter`, keyed by app-relative path, for preflight checks.
+    func unadaptedFiles() throws -> [String: Data] {
+        var result: [String: Data] = [:]
+        for file in try readManifest().files {
+            let url = targetURL(for: file)
+            let source = try String(contentsOf: url, encoding: .utf8)
+            let data = Data((source.contains("__bridgeDock") ? try unadaptedSource(source, file: file) : source).utf8)
+            result[String(url.path.dropFirst(appResources.path.count + 1))] = data
+        }
+        return result
+    }
+
+    /// Removes the adapter in place so another patch can be installed or restored.
+    /// Callers reinstall afterwards with `install(identity:)`.
+    func removeAdapter() throws {
+        try requireStoppedApplication()
+        let manifest = try readManifest()
+        var product = try readProduct()
+        var checksums = product["checksums"] as? [String: String] ?? [:]
+        var changes: [URL: Data] = [:]
+        for file in manifest.files {
+            let url = targetURL(for: file)
+            let source = try String(contentsOf: url, encoding: .utf8)
+            let original = try unadaptedSource(source, file: file)
+            guard (try? adaptedSource(original, file: file)) != nil else {
+                throw BridgeError.message("Cursor \(file.name) 撤下适配后无法还原为当前文件，已停止。")
+            }
+            let data = Data(original.utf8)
+            changes[url] = data
+            if file.loadsRuntime {
+                checksums["vs/workbench/" + file.name] = Data(SHA256.hash(data: data)).base64EncodedString().replacingOccurrences(of: "=", with: "")
+            }
+        }
+        product["checksums"] = checksums
+        changes[appResources.appendingPathComponent("product.json")] = try jsonData(product)
+        try requireStoppedApplication()
+        for (url, data) in changes { try data.write(to: url, options: .atomic) }
+        try? FileManager.default.removeItem(at: workbench.appendingPathComponent("bridgedock-local.js"))
+        try? FileManager.default.removeItem(at: recordURL)
+    }
+
     func restore() throws {
         let record = try JSONDecoder().decode(Installation.self, from: Data(contentsOf: recordURL))
         guard matchesInstalledFiles(record) else { throw BridgeError.message("Cursor 已更新或被其他程序修改，无法自动覆盖。备份在 cursor-backups 目录。") }

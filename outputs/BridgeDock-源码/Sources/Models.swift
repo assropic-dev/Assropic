@@ -62,6 +62,8 @@ struct Channel: Codable, Identifiable, Equatable {
     var balancePath = ""
     var credentialSource = "api-key"
     var desktopAccountHash = ""
+    /// Per upstream model ID, as reported by the provider's /models when last queried.
+    var capabilities: [String: ModelCapability] = [:]
     var isKimiWork: Bool { credentialSource == "kimi-work-desktop" }
 
     var models: [[String: String]] {
@@ -130,6 +132,77 @@ struct Channel: Codable, Identifiable, Equatable {
                                     "models": models, "keys": [["api-key": apiKey]], "request-retry": isKimiWork ? 0 : 1]
         if !proxyURL.isEmpty { value["proxy-url"] = proxyURL }
         if isKimiWork { value["headers"] = ["User-Agent": "BridgeDock/1.3.2"] }
+        return value
+    }
+}
+
+/// Context window and reasoning levels for one upstream model, as reported by the
+/// core's model definitions or the provider's own /models response. Unknown stays nil.
+struct ModelCapability: Codable, Equatable {
+    var contextLength: Int?
+    var maxOutputTokens: Int?
+    var reasoningEfforts: [String]?
+    var supportsVision: Bool?
+
+    var isEmpty: Bool { contextLength == nil && maxOutputTokens == nil && reasoningEfforts == nil && supportsVision == nil }
+
+    static let effortOrder = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+    /// Accepts the shapes seen in the wild: CLIProxyAPI definitions (`context_length`,
+    /// `inputTokenLimit`, `thinking.levels`), Kimi (`think_efforts.valid_efforts`) and
+    /// OpenAI-style `capabilities`.
+    init?(definition value: [String: Any]) {
+        func positive(_ any: Any?) -> Int? {
+            guard let number = (any as? NSNumber)?.intValue ?? (any as? String).flatMap(Int.init), number > 0 else { return nil }
+            return number
+        }
+        let nested = value["capabilities"] as? [String: Any] ?? [:]
+        contextLength = positive(value["context_length"]) ?? positive(nested["context_length"]) ?? positive(value["inputTokenLimit"])
+            ?? positive(value["context_window"]) ?? positive(value["max_context_length"])
+        maxOutputTokens = positive(value["max_completion_tokens"]) ?? positive(nested["max_output_tokens"]) ?? positive(value["outputTokenLimit"])
+            ?? positive(value["max_output_tokens"])
+        var levels: [String]?
+        if let thinking = value["thinking"] as? [String: Any] {
+            if let named = thinking["levels"] as? [String], !named.isEmpty { levels = named }
+            else if thinking["max"] != nil || thinking["dynamic_allowed"] != nil { levels = ["low", "medium", "high"] }
+            if thinking["zero_allowed"] as? Bool == true, let current = levels, !current.contains("none") { levels = ["none"] + current }
+        }
+        if let kimi = (value["think_efforts"] as? [String: Any]), kimi["support"] as? Bool != false,
+           let valid = kimi["valid_efforts"] as? [String], !valid.isEmpty { levels = valid }
+        if let advertised = nested["reasoning_effort"] as? [String], !advertised.isEmpty { levels = advertised }
+        if levels == nil, value["supports_reasoning"] as? Bool == true { levels = ["low", "medium", "high"] }
+        reasoningEfforts = levels.map(Self.sortedEfforts).flatMap { $0.isEmpty ? nil : $0 }
+        if let vision = nested["supports_vision"] as? Bool ?? value["supports_image_in"] as? Bool { supportsVision = vision }
+        else if let inputs = value["supportedInputModalities"] as? [String] ?? (value["modalities"] as? [String: Any])?["input"] as? [String] {
+            supportsVision = inputs.contains("image")
+        }
+        if isEmpty { return nil }
+    }
+
+    init(contextLength: Int? = nil, maxOutputTokens: Int? = nil, reasoningEfforts: [String]? = nil, supportsVision: Bool? = nil) {
+        self.contextLength = contextLength; self.maxOutputTokens = maxOutputTokens
+        self.reasoningEfforts = reasoningEfforts.map(Self.sortedEfforts); self.supportsVision = supportsVision
+    }
+
+    static func sortedEfforts(_ values: [String]) -> [String] {
+        let clean = values.map { $0.lowercased() }.filter { $0.range(of: "^[a-z][a-z0-9_-]{0,31}$", options: .regularExpression) != nil }
+        return Array(Set(clean)).sorted {
+            (effortOrder.firstIndex(of: $0) ?? 99, $0) < (effortOrder.firstIndex(of: $1) ?? 99, $1)
+        }
+    }
+
+    /// The fields Cursor's local runtime reads from /v1/models.
+    var catalogFields: [String: Any] {
+        var capabilities: [String: Any] = ["supports_tool_use": true, "supports_streaming": true, "output_modalities": ["text"]]
+        var value: [String: Any] = [:]
+        if let contextLength { capabilities["context_length"] = contextLength; value["context_length"] = contextLength }
+        if let maxOutputTokens { capabilities["max_output_tokens"] = maxOutputTokens }
+        if let efforts = reasoningEfforts?.filter({ $0 != "none" }), !efforts.isEmpty {
+            capabilities["reasoning_effort"] = efforts
+            capabilities["supports_reasoning"] = true
+        }
+        if let supportsVision { capabilities["supports_vision"] = supportsVision }
+        value["capabilities"] = capabilities
         return value
     }
 }
@@ -291,6 +364,7 @@ extension Channel {
         balancePath = try c.decodeIfPresent(String.self, forKey: .balancePath) ?? ""
         credentialSource = try c.decodeIfPresent(String.self, forKey: .credentialSource) ?? "api-key"
         desktopAccountHash = try c.decodeIfPresent(String.self, forKey: .desktopAccountHash) ?? ""
+        capabilities = (try? c.decodeIfPresent([String: ModelCapability].self, forKey: .capabilities)) ?? [:]
     }
 }
 

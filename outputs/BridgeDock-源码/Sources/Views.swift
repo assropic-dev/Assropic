@@ -576,6 +576,7 @@ struct ChannelEditor: View {
                 if channel.name == snapshot.name { channel.name = result.channel.name }
                 if channel.balanceMode == snapshot.balanceMode { channel.balanceMode = result.channel.balanceMode }
                 if channel.balancePath == snapshot.balancePath { channel.balancePath = result.channel.balancePath }
+                if !result.capabilities.isEmpty { channel.capabilities = result.capabilities }
                 let safeToReplace = modelRevision == revision && channel.modelLines == snapshot.modelLines && (manual || !userEditedModels)
                 if safeToReplace {
                     channel.modelLines = result.modelLines

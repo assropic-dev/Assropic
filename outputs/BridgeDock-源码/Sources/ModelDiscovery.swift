@@ -4,6 +4,7 @@ struct ModelDiscovery {
     let channel: Channel
     let modelLines: String
     let notice: String
+    var capabilities: [String: ModelCapability] = [:]
 }
 
 struct ModelListRequest {
@@ -44,6 +45,16 @@ struct ModelListRequest {
     static func names(in value: [String: Any]) -> [String] {
         let rows = value["data"] as? [[String: Any]] ?? value["models"] as? [[String: Any]] ?? []
         return Array(Set(rows.compactMap { ($0["id"] as? String ?? $0["slug"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })).sorted()
+    }
+    static func capabilities(in value: [String: Any]) -> [String: ModelCapability] {
+        let rows = value["data"] as? [[String: Any]] ?? value["models"] as? [[String: Any]] ?? []
+        var result: [String: ModelCapability] = [:]
+        for row in rows {
+            guard let id = (row["id"] as? String ?? row["slug"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty,
+                  let capability = ModelCapability(definition: row) else { continue }
+            result[id] = capability
+        }
+        return result
     }
     static func kimiAlternative(for channel: Channel) -> Channel? {
         guard let preset = Preset.matching(channel) else { return nil }
