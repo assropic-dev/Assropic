@@ -1,0 +1,611 @@
+--- a/internal/plugin/plugin.go
++++ b/internal/plugin/plugin.go
+@@ -21,7 +21,7 @@
+ 	"gopkg.in/yaml.v3"
+ )
+ 
+-const Version = "0.2.0"
++const Version = "0.2.2-bridgedock-web-login.1"
+ 
+ type Config struct {
+ 	StateDir string `yaml:"state_dir" json:"state_dir"`
+@@ -146,19 +146,11 @@
+ 	return pluginapi.AuthParseResponse{Handled: true, Auth: auth}, nil
+ }
+ 
+-func (p *Plugin) StartLogin(context.Context, pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
+-	return pluginapi.AuthLoginStartResponse{Provider: cursoragentv1.ProviderID}, fmt.Errorf("cursor-agent-v1 login is file import only: save a JSON auth file with type %q and api_key", cursoragentv1.ProviderID)
+-}
+-
+-func (p *Plugin) PollLogin(context.Context, pluginapi.AuthLoginPollRequest) (pluginapi.AuthLoginPollResponse, error) {
+-	return pluginapi.AuthLoginPollResponse{
+-		Status:  pluginapi.AuthLoginStatusError,
+-		Message: "cursor-agent-v1 has no interactive login",
+-	}, nil
+-}
+-
+ func (p *Plugin) RefreshAuth(ctx context.Context, req pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
+ 	auth := authFromPlugin(req.AuthID, req.AuthProvider, req.StorageJSON, req.Metadata, req.Attributes)
++	if metaString(auth, "auth_method") == "browser" {
++		return p.refreshBrowserAuth(ctx, req, auth)
++	}
+ 	next, err := p.executor.Refresh(ctx, auth)
+ 	if err != nil {
+ 		return pluginapi.AuthRefreshResponse{}, err
+@@ -314,6 +306,11 @@
+ 	BaseURL        string `json:"base_url"`
+ 	ClientVersion  string `json:"client_version"`
+ 	RuntimeProfile string `json:"runtime_profile"`
++	AuthMethod     string `json:"auth_method,omitempty"`
++	SelectedTeamID string `json:"selected_team_id,omitempty"`
++	Prefix         string `json:"prefix,omitempty"`
++	ProxyURL       string `json:"proxy_url,omitempty"`
++	Note           string `json:"note,omitempty"`
+ }
+ 
+ func parseStorage(raw []byte) (storageFile, bool) {
+@@ -345,16 +342,18 @@
+ 	refresh := firstNonEmpty(data.RefreshToken, data.RefreshToken2)
+ 	account := firstNonEmpty(data.AccountID, data.AccountID2)
+ 	metadata := map[string]any{
+-		"api_key":         strings.TrimSpace(data.APIKey),
+-		"access_token":    strings.TrimSpace(access),
+-		"refresh_token":   strings.TrimSpace(refresh),
+-		"account_id":      strings.TrimSpace(account),
+-		"email":           strings.TrimSpace(data.Email),
+-		"expired":         strings.TrimSpace(data.Expired),
+-		"last_refresh":    strings.TrimSpace(data.LastRefresh),
+-		"base_url":        strings.TrimSpace(data.BaseURL),
+-		"client_version":  strings.TrimSpace(data.ClientVersion),
+-		"runtime_profile": strings.ToLower(strings.TrimSpace(data.RuntimeProfile)),
++		"api_key":          strings.TrimSpace(data.APIKey),
++		"access_token":     strings.TrimSpace(access),
++		"refresh_token":    strings.TrimSpace(refresh),
++		"account_id":       strings.TrimSpace(account),
++		"email":            strings.TrimSpace(data.Email),
++		"expired":          strings.TrimSpace(data.Expired),
++		"last_refresh":     strings.TrimSpace(data.LastRefresh),
++		"base_url":         strings.TrimSpace(data.BaseURL),
++		"client_version":   strings.TrimSpace(data.ClientVersion),
++		"runtime_profile":  strings.ToLower(strings.TrimSpace(data.RuntimeProfile)),
++		"auth_method":      data.AuthMethod,
++		"selected_team_id": data.SelectedTeamID,
+ 
+ 		"refresh_interval_seconds": int(hostRefreshInterval / time.Second),
+ 	}
+@@ -364,6 +363,8 @@
+ 		Provider:    cursoragentv1.ProviderID,
+ 		FileName:    firstNonEmpty(fileName, path),
+ 		Label:       label,
++		Prefix:      data.Prefix,
++		ProxyURL:    data.ProxyURL,
+ 		StorageJSON: encoded,
+ 		Metadata:    metadata,
+ 	}
+@@ -444,20 +445,20 @@
+ 		format = sdktranslator.FormatClaude
+ 	}
+ 	return auth, cliproxyexecutor.Request{
+-			Model:    req.Model,
+-			Payload:  req.Payload,
+-			Format:   format,
+-			Metadata: req.Metadata,
+-		}, cliproxyexecutor.Options{
+-			Stream:          req.Stream,
+-			Alt:             req.Alt,
+-			Headers:         cloneHeader(req.Headers),
+-			Query:           req.Query,
+-			OriginalRequest: req.OriginalRequest,
+-			SourceFormat:    source,
+-			ResponseFormat:  format,
+-			Metadata:        req.Metadata,
+-		}
++		Model:    req.Model,
++		Payload:  req.Payload,
++		Format:   format,
++		Metadata: req.Metadata,
++	}, cliproxyexecutor.Options{
++		Stream:          req.Stream,
++		Alt:             req.Alt,
++		Headers:         cloneHeader(req.Headers),
++		Query:           req.Query,
++		OriginalRequest: req.OriginalRequest,
++		SourceFormat:    source,
++		ResponseFormat:  format,
++		Metadata:        req.Metadata,
++	}
+ }
+ 
+ func firstNonEmpty(values ...string) string {
+--- /dev/null
++++ b/internal/plugin/browser_login.go
+@@ -0,0 +1,184 @@
++package plugin
++
++import (
++	"context"
++	"crypto/rand"
++	"crypto/sha256"
++	"encoding/base64"
++	"fmt"
++	"net/http"
++	"net/url"
++	"strconv"
++	"strings"
++	"time"
++
++	"github.com/enderzcx/cursor-agent2api/cursoragentv1"
++	"github.com/enderzcx/cursor-agent2api/internal/jsonx"
++	"github.com/google/uuid"
++	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
++	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
++)
++
++// Cursor's Grok Bot login uses a proof key and polling. Only the challenge
++// goes to the browser; the verifier stays in the host's private login session.
++func (p *Plugin) StartLogin(_ context.Context, req pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
++	random := make([]byte, 32)
++	if _, err := rand.Read(random); err != nil {
++		return pluginapi.AuthLoginStartResponse{}, fmt.Errorf("generate browser login proof key: %w", err)
++	}
++	verifier := base64.RawURLEncoding.EncodeToString(random)
++	digest := sha256.Sum256([]byte(verifier))
++	state := uuid.NewString()
++	expiresAt := time.Now().Add(5 * time.Minute)
++	query := url.Values{
++		"challenge": {base64.RawURLEncoding.EncodeToString(digest[:])},
++		"uuid":      {state}, "mode": {"login"}, "redirectTarget": {"sand"},
++		"supportsSelectedTeamLogin": {"true"},
++	}
++	return pluginapi.AuthLoginStartResponse{
++		Provider: cursoragentv1.ProviderID,
++		URL:      "https://cursor.com/loginDeepControl?" + query.Encode(),
++		State:    state, ExpiresAt: expiresAt,
++		Metadata: map[string]any{
++			"verifier": verifier, "expires_at": expiresAt.UTC().Format(time.RFC3339Nano),
++		},
++	}, nil
++}
++
++// The bundled Grok Bot client renews Cursor credentials through this endpoint.
++// Refresh before the host's next thirty-minute check can cross token expiry.
++func (p *Plugin) refreshBrowserAuth(ctx context.Context, req pluginapi.AuthRefreshRequest, auth *cliproxyauth.Auth) (pluginapi.AuthRefreshResponse, error) {
++	access := metaString(auth, "access_token")
++	refresh := metaString(auth, "refresh_token")
++	accountID := metaString(auth, "account_id")
++	if refresh == "" || accountID == "" {
++		return pluginapi.AuthRefreshResponse{}, fmt.Errorf("Grok Bot 登录凭据不完整，请重新网页登录")
++	}
++	// Expired access tokens can still be refreshed, but never change identity.
++	subject, expiry, err := cursoragentv1.BrowserTokenIdentity(access)
++	if err != nil || subject != accountID {
++		return pluginapi.AuthRefreshResponse{}, fmt.Errorf("Grok Bot 登录身份不一致，请重新网页登录")
++	}
++	if time.Until(expiry) <= 31*time.Minute {
++		if req.HTTPClient == nil {
++			return pluginapi.AuthRefreshResponse{}, fmt.Errorf("Grok Bot 续期没有可用的网络连接")
++		}
++		body, err := jsonx.Marshal(map[string]string{
++			"client_id":  "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB",
++			"grant_type": "refresh_token", "refresh_token": refresh,
++		})
++		if err != nil {
++			return pluginapi.AuthRefreshResponse{}, err
++		}
++		requestCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
++		defer cancel()
++		response, err := req.HTTPClient.Do(requestCtx, pluginapi.HTTPRequest{
++			Method: http.MethodPost, URL: "https://api2.cursor.sh/oauth/token",
++			Headers: http.Header{"Content-Type": {"application/json"}, "Accept": {"application/json"}},
++			Body:    body,
++		})
++		if err != nil {
++			return pluginapi.AuthRefreshResponse{}, fmt.Errorf("Grok Bot 续期暂时无法连接服务器")
++		}
++		if response.StatusCode != http.StatusOK {
++			return pluginapi.AuthRefreshResponse{}, fmt.Errorf("Grok Bot 续期失败（HTTP %d），请稍后重试或重新网页登录", response.StatusCode)
++		}
++		var result struct {
++			AccessToken  string `json:"access_token"`
++			RefreshToken string `json:"refresh_token"`
++			ShouldLogout bool   `json:"shouldLogout"`
++		}
++		if len(response.Body) > 1<<20 || jsonx.Unmarshal(response.Body, &result) != nil || result.ShouldLogout {
++			return pluginapi.AuthRefreshResponse{}, fmt.Errorf("Grok Bot 登录已失效，请重新网页登录")
++		}
++		renewedSubject, renewedExpiry, err := cursoragentv1.BrowserTokenIdentity(result.AccessToken)
++		if err != nil || renewedSubject != accountID || !renewedExpiry.After(time.Now()) {
++			return pluginapi.AuthRefreshResponse{}, fmt.Errorf("Grok Bot 续期返回的账号身份或有效期不正确")
++		}
++		access, expiry = result.AccessToken, renewedExpiry
++		if strings.TrimSpace(result.RefreshToken) != "" {
++			refresh = result.RefreshToken
++		}
++	}
++	next := auth.Clone()
++	next.Metadata["access_token"] = access
++	next.Metadata["refresh_token"] = refresh
++	next.Metadata["expired"] = expiry.UTC().Format(time.RFC3339)
++	next.Metadata["last_refresh"] = time.Now().UTC().Format(time.RFC3339Nano)
++	result := authToAuthData(next)
++	result.StorageJSON = mergeStorage(req.StorageJSON, next)
++	return pluginapi.AuthRefreshResponse{Auth: result, NextRefreshAfter: expiry.Add(-31 * time.Minute)}, nil
++}
++
++func (p *Plugin) PollLogin(ctx context.Context, req pluginapi.AuthLoginPollRequest) (pluginapi.AuthLoginPollResponse, error) {
++	failed := func(message string) (pluginapi.AuthLoginPollResponse, error) {
++		return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusError, Message: message}, nil
++	}
++	verifier, _ := req.Metadata["verifier"].(string)
++	expires, _ := req.Metadata["expires_at"].(string)
++	expiresAt, err := time.Parse(time.RFC3339Nano, expires)
++	if err != nil || !time.Now().Before(expiresAt) {
++		return failed("本次 Grok Bot 登录已超时，请重新发起网页登录。")
++	}
++	if _, err := uuid.Parse(req.State); err != nil || len(verifier) != 43 {
++		return failed("Grok Bot 登录会话无效，请重新发起网页登录。")
++	}
++	if req.HTTPClient == nil {
++		return failed("登录服务没有可用的网络连接。")
++	}
++	query := url.Values{"uuid": {req.State}, "verifier": {verifier}}
++	requestCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
++	defer cancel()
++	response, err := req.HTTPClient.Do(requestCtx, pluginapi.HTTPRequest{
++		Method: http.MethodGet, URL: "https://api2.cursor.sh/auth/poll?" + query.Encode(),
++		Headers: http.Header{"Accept": {"application/json"}, "Content-Type": {"application/json"}},
++	})
++	if err != nil {
++		if ctx.Err() != nil {
++			return pluginapi.AuthLoginPollResponse{}, ctx.Err()
++		}
++		return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusPending}, nil
++	}
++	if response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusUnauthorized {
++		return failed("Cursor 拒绝了本次 Grok Bot 授权，请在网页登录页检查账号后重试。")
++	}
++	if response.StatusCode != http.StatusOK {
++		return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusPending}, nil
++	}
++	var result struct {
++		AccessToken    string `json:"accessToken"`
++		RefreshToken   string `json:"refreshToken"`
++		SelectedTeamID *int64 `json:"selectedTeamId"`
++	}
++	if len(response.Body) > 1<<20 || jsonx.Unmarshal(response.Body, &result) != nil {
++		return failed("Cursor 登录响应格式无效，请重新发起授权。")
++	}
++	access := strings.TrimSpace(result.AccessToken)
++	refresh := strings.TrimSpace(result.RefreshToken)
++	subject, expiry, err := cursoragentv1.BrowserTokenIdentity(access)
++	if err != nil || refresh == "" || !expiry.After(time.Now()) {
++		return failed("网页登录未返回有效的 Cursor 账号凭据，请使用 Cursor 账号重新登录。")
++	}
++	teamID := ""
++	if result.SelectedTeamID != nil {
++		if *result.SelectedTeamID <= 0 {
++			return failed("Cursor 返回了无效的团队身份。")
++		}
++		teamID = strconv.FormatInt(*result.SelectedTeamID, 10)
++	}
++	// Each explicit login adds a credential without overwriting an existing
++	// account, including a prior login with independent routing preferences.
++	filename := "grok-bot-login-" + req.State + ".json"
++	data := storageFile{
++		Type: cursoragentv1.ProviderID, AccessToken: access, RefreshToken: refresh,
++		AccountID: subject, Expired: expiry.UTC().Format(time.RFC3339),
++		LastRefresh: time.Now().UTC().Format(time.RFC3339Nano),
++		BaseURL:     "https://api2.cursor.sh", ClientVersion: "0.78.1",
++		RuntimeProfile: "sand", AuthMethod: "browser", SelectedTeamID: teamID,
++		Prefix: "grok-bot-" + strings.ReplaceAll(req.State, "-", ""),
++		Note:   "Grok Bot",
++	}
++	auth := storageToAuthData(data, filename, "")
++	auth.Metadata["note"] = data.Note
++	return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusSuccess, Auth: auth}, nil
++}
+--- /dev/null
++++ b/internal/plugin/browser_login_test.go
+@@ -0,0 +1,180 @@
++package plugin
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/base64"
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"net/url"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
++	"github.com/stretchr/testify/require"
++)
++
++type browserTestClient struct {
++	t       *testing.T
++	respond func(pluginapi.HTTPRequest) pluginapi.HTTPResponse
++	calls   int
++}
++
++func (c *browserTestClient) Do(_ context.Context, request pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
++	c.calls++
++	return c.respond(request), nil
++}
++
++func (c *browserTestClient) DoStream(context.Context, pluginapi.HTTPRequest) (pluginapi.HTTPStreamResponse, error) {
++	c.t.Fatal("browser login must not open a streaming request")
++	return pluginapi.HTTPStreamResponse{}, nil
++}
++
++func browserTestToken(subject string, expiry time.Time) string {
++	payload, _ := json.Marshal(map[string]any{"sub": subject, "exp": expiry.Unix()})
++	return "test." + base64.RawURLEncoding.EncodeToString(payload) + ".signature"
++}
++
++func TestBrowserLoginProofKeyAndPolling(t *testing.T) {
++	p := testPlugin(t)
++	start, err := p.StartLogin(context.Background(), pluginapi.AuthLoginStartRequest{})
++	require.NoError(t, err)
++	second, err := p.StartLogin(context.Background(), pluginapi.AuthLoginStartRequest{})
++	require.NoError(t, err)
++	require.NotEqual(t, start.State, second.State)
++	login, err := url.Parse(start.URL)
++	require.NoError(t, err)
++	require.Equal(t, "https", login.Scheme)
++	require.Equal(t, "cursor.com", login.Host)
++	require.Equal(t, "/loginDeepControl", login.Path)
++	require.Equal(t, "sand", login.Query().Get("redirectTarget"))
++	require.Equal(t, "login", login.Query().Get("mode"))
++	require.Equal(t, start.State, login.Query().Get("uuid"))
++	verifier := start.Metadata["verifier"].(string)
++	random, err := base64.RawURLEncoding.DecodeString(verifier)
++	require.NoError(t, err)
++	require.Len(t, random, 32)
++	challenge := sha256.Sum256([]byte(verifier))
++	require.Equal(t, base64.RawURLEncoding.EncodeToString(challenge[:]), login.Query().Get("challenge"))
++	require.NotContains(t, start.URL, verifier)
++	require.WithinDuration(t, time.Now().Add(5*time.Minute), start.ExpiresAt, time.Second)
++
++	token := browserTestToken("account-one", time.Now().Add(time.Hour))
++	client := &browserTestClient{t: t}
++	client.respond = func(request pluginapi.HTTPRequest) pluginapi.HTTPResponse {
++		poll, err := url.Parse(request.URL)
++		require.NoError(t, err)
++		require.Equal(t, "api2.cursor.sh", poll.Host)
++		require.Equal(t, "/auth/poll", poll.Path)
++		require.Equal(t, verifier, poll.Query().Get("verifier"))
++		require.Equal(t, start.State, poll.Query().Get("uuid"))
++		if client.calls == 1 {
++			return pluginapi.HTTPResponse{StatusCode: 404}
++		}
++		body, err := json.Marshal(map[string]any{
++			"accessToken": token, "refreshToken": "test-refresh", "selectedTeamId": 123,
++		})
++		require.NoError(t, err)
++		return pluginapi.HTTPResponse{StatusCode: 200, Body: body}
++	}
++	req := pluginapi.AuthLoginPollRequest{State: start.State, Metadata: start.Metadata, HTTPClient: client}
++	pending, err := p.PollLogin(context.Background(), req)
++	require.NoError(t, err)
++	require.Equal(t, pluginapi.AuthLoginStatusPending, pending.Status)
++	completed, err := p.PollLogin(context.Background(), req)
++	require.NoError(t, err)
++	require.Equal(t, pluginapi.AuthLoginStatusSuccess, completed.Status)
++	require.Equal(t, "cursor-agent-v1", completed.Auth.Provider)
++	require.Equal(t, "sand", completed.Auth.Metadata["runtime_profile"])
++	require.Equal(t, "browser", completed.Auth.Metadata["auth_method"])
++	require.Equal(t, "account-one", completed.Auth.Metadata["account_id"])
++	require.Equal(t, "123", completed.Auth.Metadata["selected_team_id"])
++	require.NotEmpty(t, completed.Auth.Prefix)
++	require.NotContains(t, string(completed.Auth.StorageJSON), verifier)
++	require.NotContains(t, completed.Message, token)
++	parsed, err := p.ParseAuth(context.Background(), pluginapi.AuthParseRequest{
++		RawJSON: completed.Auth.StorageJSON, FileName: completed.Auth.FileName,
++	})
++	require.NoError(t, err)
++	require.Equal(t, completed.Auth.Prefix, parsed.Auth.Prefix)
++	require.Equal(t, completed.Auth.Metadata["selected_team_id"], parsed.Auth.Metadata["selected_team_id"])
++}
++
++func TestBrowserLoginRejectsIncompleteOrExpiredResults(t *testing.T) {
++	p := testPlugin(t)
++	for _, body := range []string{
++		"not-json", "{}", `{"accessToken":"not-a-token","refreshToken":"test-refresh"}`,
++		fmt.Sprintf(`{"accessToken":%q,"refreshToken":"test-refresh"}`, browserTestToken("account", time.Now().Add(-time.Hour))),
++		fmt.Sprintf(`{"accessToken":%q}`, browserTestToken("account", time.Now().Add(time.Hour))),
++	} {
++		start, err := p.StartLogin(context.Background(), pluginapi.AuthLoginStartRequest{})
++		require.NoError(t, err)
++		client := &browserTestClient{t: t, respond: func(pluginapi.HTTPRequest) pluginapi.HTTPResponse {
++			return pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(body)}
++		}}
++		result, err := p.PollLogin(context.Background(), pluginapi.AuthLoginPollRequest{State: start.State, Metadata: start.Metadata, HTTPClient: client})
++		require.NoError(t, err)
++		require.Equal(t, pluginapi.AuthLoginStatusError, result.Status)
++		require.Empty(t, result.Auth.StorageJSON)
++		require.NotContains(t, result.Message, "test-refresh")
++	}
++	start, err := p.StartLogin(context.Background(), pluginapi.AuthLoginStartRequest{})
++	require.NoError(t, err)
++	start.Metadata["expires_at"] = time.Now().Add(-time.Second).Format(time.RFC3339Nano)
++	result, err := p.PollLogin(context.Background(), pluginapi.AuthLoginPollRequest{State: start.State, Metadata: start.Metadata})
++	require.NoError(t, err)
++	require.Equal(t, pluginapi.AuthLoginStatusError, result.Status)
++}
++
++func TestBrowserRefreshUsesRefreshTokenAndPreservesRouting(t *testing.T) {
++	p := testPlugin(t)
++	data := storageFile{
++		Type: "cursor-agent-v1", AuthMethod: "browser", RuntimeProfile: "sand",
++		AccessToken: browserTestToken("account", time.Now().Add(-time.Minute)), RefreshToken: "old-refresh",
++		AccountID: "account", Prefix: "my-bot", Note: "my note", SelectedTeamID: "123",
++	}
++	raw, err := json.Marshal(data)
++	require.NoError(t, err)
++	client := &browserTestClient{t: t}
++	client.respond = func(request pluginapi.HTTPRequest) pluginapi.HTTPResponse {
++		require.Equal(t, "https://api2.cursor.sh/oauth/token", request.URL)
++		require.Equal(t, http.MethodPost, request.Method)
++		var body map[string]string
++		require.NoError(t, json.Unmarshal(request.Body, &body))
++		require.Equal(t, "refresh_token", body["grant_type"])
++		require.Equal(t, "old-refresh", body["refresh_token"])
++		require.Equal(t, "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB", body["client_id"])
++		response, err := json.Marshal(map[string]string{
++			"access_token":  browserTestToken("account", time.Now().Add(48*time.Hour)),
++			"refresh_token": "new-refresh",
++		})
++		require.NoError(t, err)
++		return pluginapi.HTTPResponse{StatusCode: 200, Body: response}
++	}
++	req := pluginapi.AuthRefreshRequest{AuthID: "browser.json", StorageJSON: raw, HTTPClient: client}
++	refreshed, err := p.RefreshAuth(context.Background(), req)
++	require.NoError(t, err)
++	require.Equal(t, "new-refresh", refreshed.Auth.Metadata["refresh_token"])
++	var saved storageFile
++	require.NoError(t, json.Unmarshal(refreshed.Auth.StorageJSON, &saved))
++	require.Equal(t, "my-bot", saved.Prefix)
++	require.Equal(t, "my note", saved.Note)
++	require.Equal(t, "123", saved.SelectedTeamID)
++	require.Equal(t, "browser", saved.AuthMethod)
++	require.True(t, refreshed.NextRefreshAfter.After(time.Now()))
++	req.StorageJSON = refreshed.Auth.StorageJSON
++	_, err = p.RefreshAuth(context.Background(), req)
++	require.NoError(t, err)
++	require.Equal(t, 1, client.calls)
++
++	req.StorageJSON = raw
++	client.respond = func(pluginapi.HTTPRequest) pluginapi.HTTPResponse {
++		body := fmt.Sprintf(`{"access_token":%q,"refresh_token":"other-secret"}`, browserTestToken("another-account", time.Now().Add(time.Hour)))
++		return pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(body)}
++	}
++	_, err = p.RefreshAuth(context.Background(), req)
++	require.Error(t, err)
++	require.False(t, strings.Contains(err.Error(), "other-secret"))
++}
+--- /dev/null
++++ b/cursoragentv1/browser_auth.go
+@@ -0,0 +1,22 @@
++package cursoragentv1
++
++import (
++	"fmt"
++	"strings"
++	"time"
++)
++
++// BrowserTokenIdentity reads the identity and expiry of a token delivered by
++// Cursor's HTTPS login endpoint. Upstream requests authenticate the token.
++// Renewal also needs these claims from an expired access token.
++func BrowserTokenIdentity(token string) (string, time.Time, error) {
++	if len(strings.Split(token, ".")) != 3 {
++		return "", time.Time{}, fmt.Errorf("invalid Cursor browser token")
++	}
++	subject := cursorTokenSubject(token)
++	expiry := jwtExpiry(token)
++	if subject == "" || expiry.IsZero() {
++		return "", time.Time{}, fmt.Errorf("Cursor browser token has no identity or expiry")
++	}
++	return subject, expiry, nil
++}
+--- /dev/null
++++ b/cursoragentv1/browser_auth_test.go
+@@ -0,0 +1,34 @@
++package cursoragentv1
++
++import (
++	"context"
++	"encoding/base64"
++	"fmt"
++	"testing"
++	"time"
++
++	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
++	"github.com/stretchr/testify/require"
++)
++
++func TestBrowserIdentityUsesTokenSubjectAndExpiry(t *testing.T) {
++	token := func(subject string, expiry time.Time) string {
++		return "test." + base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"sub":%q,"exp":%d}`, subject, expiry.Unix()))) + ".signature"
++	}
++	valid := token("browser-account", time.Now().Add(time.Hour))
++	auth := &cliproxyauth.Auth{Metadata: map[string]any{
++		"auth_method": "browser", "account_id": "browser-account", "access_token": valid,
++	}}
++	executor := &Executor{}
++	actual, err := executor.validateCursorCredentialIdentity(context.Background(), auth, valid)
++	require.NoError(t, err)
++	require.Equal(t, valid, actual)
++	_, err = executor.validateCursorCredentialIdentity(context.Background(), auth, token("another-account", time.Now().Add(time.Hour)))
++	require.Error(t, err)
++	_, err = executor.validateCursorCredentialIdentity(context.Background(), auth, token("browser-account", time.Now().Add(-time.Hour)))
++	require.Error(t, err)
++	// An ordinary imported access token cannot opt out of API-key validation.
++	delete(auth.Metadata, "auth_method")
++	_, err = executor.validateCursorCredentialIdentity(context.Background(), auth, valid)
++	require.Error(t, err)
++}
+--- a/cursoragentv1/server_config.go
++++ b/cursoragentv1/server_config.go
+@@ -61,6 +61,13 @@
+ }
+ 
+ func (e *Executor) validateCursorCredentialIdentity(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) (string, error) {
++	if metadataValue(auth, "auth_method") == "browser" {
++		subject, expiry, err := BrowserTokenIdentity(accessToken)
++		if err != nil || subject != metadataValue(auth, "account_id") || !expiry.After(time.Now()) {
++			return "", &requestError{status: http.StatusUnauthorized, text: "Grok Bot 登录已过期或身份不一致，请刷新凭据或重新网页登录"}
++		}
++		return accessToken, nil
++	}
+ 	configuredSubject := cursorTokenSubject(accessToken)
+ 	if configuredSubject == "" {
+ 		return accessToken, nil
+--- a/cursoragentv1/runner.go
++++ b/cursoragentv1/runner.go
+@@ -112,6 +112,7 @@
+ 	ProxyURL          string
+ 	AccessToken       string
+ 	ClientVersion     string
++	SelectedTeamID    string
+ 	RouteChannelID    int
+ 	RouteUserID       int
+ 	Model             string
+--- a/cursoragentv1/executor.go
++++ b/cursoragentv1/executor.go
+@@ -469,6 +469,7 @@
+ 	turn.managed.Context = ctx
+ 	turn.managed.Run.ProxyURL = proxyURL
+ 	turn.managed.Run.RuntimeProfile = runtimeProfile
++	turn.managed.Run.SelectedTeamID = metadataValue(auth, "selected_team_id")
+ 	if runtimeProfile == runtimeSand {
+ 		if err := prepareInferenceTurn(&turn, req); err != nil {
+ 			return translatedTurn{}, nil, err
+--- a/cursoragentv1/inference_runner.go
++++ b/cursoragentv1/inference_runner.go
+@@ -95,6 +95,9 @@
+ 		return inferenceSegmentOutcome{}, fmt.Errorf("build Cursor Sand request: %w", err)
+ 	}
+ 	httpRequest.Header.Set("Authorization", "Bearer "+strings.TrimSpace(request.AccessToken))
++	if request.SelectedTeamID != "" {
++		httpRequest.Header.Set("X-Cursor-Team-Id", request.SelectedTeamID)
++	}
+ 	httpRequest.Header.Set("Content-Type", "application/connect+proto")
+ 	httpRequest.Header.Set("Connect-Protocol-Version", "1")
+ 	httpRequest.Header.Set("Connect-Accept-Encoding", "gzip")
+--- a/cursoragentv1/inference_web.go
++++ b/cursoragentv1/inference_web.go
+@@ -236,6 +236,9 @@
+ 		return fmt.Errorf("build Cursor official web request: %w", err)
+ 	}
+ 	httpRequest.Header.Set("Authorization", "Bearer "+strings.TrimSpace(request.AccessToken))
++	if request.SelectedTeamID != "" {
++		httpRequest.Header.Set("X-Cursor-Team-Id", request.SelectedTeamID)
++	}
+ 	httpRequest.Header.Set("Content-Type", "application/json")
+ 	httpRequest.Header.Set("Connect-Protocol-Version", "1")
+ 	httpRequest.Header.Set("X-Cursor-Client-Type", runtimeSand)

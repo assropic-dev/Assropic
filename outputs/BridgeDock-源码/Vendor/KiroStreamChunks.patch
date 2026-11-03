@@ -1,0 +1,172 @@
+diff -ruN a2/internal/kiro/stream.go b/internal/kiro/stream.go
+--- a/internal/kiro/stream.go	2026-11-03 03:32:25
++++ b/internal/kiro/stream.go	2026-11-03 03:32:24
+@@ -24,15 +24,14 @@
+ // message_start → (content_block_start/delta/stop)* → message_delta → message_stop.
+ func buildClaudeStreamChunks(text string, calls []toolCall, model string, inputTokens int) []executorStreamChunk {
+ 	chunks := make([]executorStreamChunk, 0, 8)
++	// The host translates each chunk on its own and only reads chunks that start
++	// with "data:", so the event line travels in a separate chunk. Claude clients
++	// receive the two chunks back to back, which is the same SSE event.
+ 	add := func(event string, data any) {
+ 		body, _ := json.Marshal(data)
+-		var sb strings.Builder
+-		sb.WriteString("event: ")
+-		sb.WriteString(event)
+-		sb.WriteString("\ndata: ")
+-		sb.Write(body)
+-		sb.WriteString("\n\n")
+-		chunks = append(chunks, executorStreamChunk{Payload: []byte(sb.String())})
++		chunks = append(chunks,
++			executorStreamChunk{Payload: []byte("event: " + event + "\n")},
++			executorStreamChunk{Payload: []byte("data: " + string(body) + "\n\n")})
+ 	}
+ 
+ 	msgID := randomMessageID()
+diff -ruN a2/internal/kiro/stream_test.go b/internal/kiro/stream_test.go
+--- a/internal/kiro/stream_test.go	2026-11-03 03:32:25
++++ b/internal/kiro/stream_test.go	2026-11-03 03:32:24
+@@ -6,7 +6,7 @@
+ 	"testing"
+ )
+ 
+-// sseEventType extracts the "event:" line value from an SSE chunk payload.
++// sseEventType extracts the "event:" line value from an SSE event.
+ func sseEventType(payload []byte) string {
+ 	for _, line := range strings.Split(string(payload), "\n") {
+ 		if strings.HasPrefix(line, "event: ") {
+@@ -25,12 +25,55 @@
+ 	return ""
+ }
+ 
++// sseEvents joins the chunks the way a client receives them and splits the
++// result back into whole SSE events.
++func sseEvents(chunks []executorStreamChunk) [][]byte {
++	var sb strings.Builder
++	for _, c := range chunks {
++		sb.Write(c.Payload)
++	}
++	parts := strings.SplitAfter(sb.String(), "\n\n")
++	out := make([][]byte, 0, len(parts))
++	for _, p := range parts {
++		if p != "" {
++			out = append(out, []byte(p))
++		}
++	}
++	return out
++}
++
++// The host translator handles each chunk separately and drops any chunk that
++// does not begin with "data:", so every data line must start its own chunk.
++func TestStreamChunksDataLinesStartChunks(t *testing.T) {
++	chunks := buildClaudeStreamChunks("Hello", []toolCall{{id: "t1", name: "f", input: json.RawMessage(`{}`)}}, "m", 1)
++	dataChunks := 0
++	for i, c := range chunks {
++		p := string(c.Payload)
++		switch {
++		case strings.HasPrefix(p, "data: "):
++			dataChunks++
++			if strings.Contains(p, "event: ") {
++				t.Fatalf("chunk %d mixes data and event lines: %q", i, p)
++			}
++		case strings.HasPrefix(p, "event: "):
++			if strings.Contains(p, "data:") {
++				t.Fatalf("chunk %d mixes event and data lines: %q", i, p)
++			}
++		default:
++			t.Fatalf("chunk %d has unexpected prefix: %q", i, p)
++		}
++	}
++	if dataChunks != len(sseEvents(chunks)) {
++		t.Fatalf("data chunks = %d, events = %d", dataChunks, len(sseEvents(chunks)))
++	}
++}
++
+ func TestStreamChunksTextOnly(t *testing.T) {
+-	chunks := buildClaudeStreamChunks("Hello world", nil, "claude-sonnet-4-5", 10)
++	events := sseEvents(buildClaudeStreamChunks("Hello world", nil, "claude-sonnet-4-5", 10))
+ 
+-	got := make([]string, 0, len(chunks))
+-	for _, c := range chunks {
+-		got = append(got, sseEventType(c.Payload))
++	got := make([]string, 0, len(events))
++	for _, e := range events {
++		got = append(got, sseEventType(e))
+ 	}
+ 	want := []string{
+ 		"message_start",
+@@ -44,41 +87,37 @@
+ 		t.Fatalf("event sequence mismatch:\n got=%v\nwant=%v", got, want)
+ 	}
+ 
+-	// Each chunk must be a well-formed SSE event terminated by a blank line.
+-	for i, c := range chunks {
+-		if !strings.HasSuffix(string(c.Payload), "\n\n") {
+-			t.Fatalf("chunk %d not terminated by blank line: %q", i, c.Payload)
++	for i, e := range events {
++		if !strings.HasPrefix(string(e), "event: ") || !strings.HasSuffix(string(e), "\n\n") {
++			t.Fatalf("event %d is not a well-formed SSE event: %q", i, e)
+ 		}
+ 	}
+ 
+-	// The text delta must carry the full text.
+ 	var delta struct {
+ 		Delta struct {
+ 			Text string `json:"text"`
+ 		} `json:"delta"`
+ 	}
+-	if err := json.Unmarshal([]byte(sseData(chunks[2].Payload)), &delta); err != nil {
++	if err := json.Unmarshal([]byte(sseData(events[2])), &delta); err != nil {
+ 		t.Fatalf("decode delta: %v", err)
+ 	}
+ 	if delta.Delta.Text != "Hello world" {
+ 		t.Fatalf("unexpected delta text: %q", delta.Delta.Text)
+ 	}
+ 
+-	// Final stop_reason must be end_turn for a text-only response.
+-	if !strings.Contains(sseData(chunks[4].Payload), `"stop_reason":"end_turn"`) {
+-		t.Fatalf("expected end_turn in message_delta: %s", sseData(chunks[4].Payload))
++	if !strings.Contains(sseData(events[4]), `"stop_reason":"end_turn"`) {
++		t.Fatalf("expected end_turn in message_delta: %s", sseData(events[4]))
+ 	}
+ }
+ 
+ func TestStreamChunksWithToolUse(t *testing.T) {
+ 	calls := []toolCall{{id: "t1", name: "get_weather", input: json.RawMessage(`{"city":"NYC"}`)}}
+-	chunks := buildClaudeStreamChunks("", calls, "claude-sonnet-4-5", 10)
++	events := sseEvents(buildClaudeStreamChunks("", calls, "claude-sonnet-4-5", 10))
+ 
+-	got := make([]string, 0, len(chunks))
+-	for _, c := range chunks {
+-		got = append(got, sseEventType(c.Payload))
++	got := make([]string, 0, len(events))
++	for _, e := range events {
++		got = append(got, sseEventType(e))
+ 	}
+-	// No text block, so: message_start, tool block start/delta/stop, message_delta, message_stop.
+ 	want := []string{
+ 		"message_start",
+ 		"content_block_start",
+@@ -91,18 +130,15 @@
+ 		t.Fatalf("event sequence mismatch:\n got=%v\nwant=%v", got, want)
+ 	}
+ 
+-	// tool_use block start must include id and name.
+-	start := sseData(chunks[1].Payload)
++	start := sseData(events[1])
+ 	if !strings.Contains(start, `"type":"tool_use"`) || !strings.Contains(start, `"id":"t1"`) || !strings.Contains(start, `"name":"get_weather"`) {
+ 		t.Fatalf("unexpected tool_use start: %s", start)
+ 	}
+-	// input arrives as an input_json_delta partial_json string.
+-	deltaData := sseData(chunks[2].Payload)
++	deltaData := sseData(events[2])
+ 	if !strings.Contains(deltaData, `"type":"input_json_delta"`) {
+ 		t.Fatalf("expected input_json_delta: %s", deltaData)
+ 	}
+-	// stop_reason must be tool_use.
+-	if !strings.Contains(sseData(chunks[4].Payload), `"stop_reason":"tool_use"`) {
+-		t.Fatalf("expected tool_use stop_reason: %s", sseData(chunks[4].Payload))
++	if !strings.Contains(sseData(events[4]), `"stop_reason":"tool_use"`) {
++		t.Fatalf("expected tool_use stop_reason: %s", sseData(events[4]))
+ 	}
+ }

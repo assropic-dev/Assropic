@@ -46,6 +46,10 @@ struct MenuContent: View {
             if store.running { store.stop() } else { Task { await store.start() } }
         }.disabled(store.busy)
         Button("复制 API 地址") { store.copy(store.apiURL) }
+        Button("打开 Claude") { Task { await store.openClaudeDesktop() } }
+            .disabled(store.launchingAgent || store.busy)
+        Button("打开 Cursor 主窗口") { Task { await store.openCursorWindow() } }
+            .disabled(store.cursorBusy || store.busy || store.launchingAgent)
         Divider()
         Button("退出 BridgeDock") { NSApp.terminate(nil) }.keyboardShortcut("q")
     }

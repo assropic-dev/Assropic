@@ -1,0 +1,281 @@
+{
+  "version": "3.27.22",
+  "files": [
+    {
+      "name": "workbench.desktop.main.js",
+      "patches": [
+        {
+          "find": "async refreshDefaultModels(){",
+          "replace": "async refreshDefaultModels(){globalThis.__bridgeDockRestoreModels(this);if(globalThis.__bridgeDockLocal){await globalThis.__bridgeDockRefreshModels(this,Kbt);return;}",
+          "previousReplacements": [
+            "async refreshDefaultModels(){if(globalThis.__bridgeDockLocal){await globalThis.__bridgeDockRefreshModels(this,Kbt);return;}"
+          ]
+        },
+        {
+          "find": "localMode:!1,restoresStoredServer:",
+          "replace": "localMode:!!globalThis.__bridgeDockLocal,restoresStoredServer:"
+        },
+        {
+          "find": "this.refreshToken=()=>this.storageService.get(\"cursorAuth/refreshToken\",-1)",
+          "replace": "this.refreshToken=()=>globalThis.__bridgeDockLocal?.token??this.storageService.get(\"cursorAuth/refreshToken\",-1)"
+        },
+        {
+          "find": "this.accessToken=()=>this.isSessionWithheld()?void 0:this.heldAccessToken()",
+          "replace": "this.accessToken=()=>globalThis.__bridgeDockLocal?.token??(this.isSessionWithheld()?void 0:this.heldAccessToken())"
+        },
+        {
+          "find": "isAuthenticated(){const e=this.accessToken()",
+          "replace": "isAuthenticated(){if(globalThis.__bridgeDockLocal)return true;const e=this.accessToken()"
+        },
+        {
+          "find": "async getEmailAndSignUpType(){",
+          "replace": "async getEmailAndSignUpType(){if(globalThis.__bridgeDockLocal)return {email:globalThis.__bridgeDockLocal.email,signUpType:\"unknown\"};"
+        },
+        {
+          "find": "this.getCachedAccountProfile=()=>{",
+          "replace": "this.getCachedAccountProfile=()=>{if(globalThis.__bridgeDockLocal)return {authId:globalThis.__bridgeDockLocal.id,displayName:globalThis.__bridgeDockLocal.name};"
+        },
+        {
+          "find": "this.refreshAccessToken=async(Y=!1)=>{",
+          "replace": "this.refreshAccessToken=async(Y=!1)=>{if(globalThis.__bridgeDockLocal)return;"
+        },
+        {
+          "find": "this.refreshMembership=async Y=>{",
+          "replace": "this.refreshMembership=async Y=>{if(globalThis.__bridgeDockLocal)return;"
+        },
+        {
+          "find": "async getAccessToken(){this.authDebugLog",
+          "replace": "async getAccessToken(){if(globalThis.__bridgeDockLocal)return globalThis.__bridgeDockLocal.token;this.authDebugLog"
+        },
+        {
+          "find": "async getLocalAgentProviderConfig(e,t){",
+          "replace": "async getLocalAgentProviderConfig(e,t){if(globalThis.__bridgeDockLocal)return {baseUrl:globalThis.__bridgeDockLocal.baseURL,apiKey:globalThis.__bridgeDockLocal.key,customHeaders:globalThis.__bridgeDockParameterHeaders()};",
+          "previousReplacements": [
+            "async getLocalAgentProviderConfig(e,t){if(globalThis.__bridgeDockLocal)return {baseUrl:globalThis.__bridgeDockLocal.baseURL,apiKey:globalThis.__bridgeDockLocal.key};"
+          ]
+        },
+        {
+          "find": "async getLocalInferenceProviderConfig(){",
+          "replace": "async getLocalInferenceProviderConfig(){if(globalThis.__bridgeDockLocal)return {baseUrl:globalThis.__bridgeDockLocal.baseURL,apiKey:globalThis.__bridgeDockLocal.key,customHeaders:globalThis.__bridgeDockParameterHeaders(),userAgent:\"BridgeDock\",modelId:globalThis.__bridgeDockLocal.model};",
+          "previousReplacements": [
+            "async getLocalInferenceProviderConfig(){if(globalThis.__bridgeDockLocal)return {baseUrl:globalThis.__bridgeDockLocal.baseURL,apiKey:globalThis.__bridgeDockLocal.key,userAgent:\"BridgeDock\",modelId:globalThis.__bridgeDockLocal.model};"
+          ]
+        },
+        {
+          "find": "get skipOnboarding(){return this.payload",
+          "replace": "get skipOnboarding(){if(globalThis.__bridgeDockLocal)return true;return this.payload"
+        },
+        {
+          "find": "this.getCurrentAuthId=()=>{",
+          "replace": "this.getCurrentAuthId=()=>{if(globalThis.__bridgeDockLocal)return globalThis.__bridgeDockLocal.id;"
+        },
+        {
+          "find": "this.getScopedDashboardProfile=async Y=>{",
+          "replace": "this.getScopedDashboardProfile=async Y=>{if(globalThis.__bridgeDockLocal)return {firstName:globalThis.__bridgeDockLocal.name,lastName:\"\",teamName:\"\",authId:globalThis.__bridgeDockLocal.id,email:globalThis.__bridgeDockLocal.email};"
+        },
+        {
+          "find": "getEffectiveCredentials(){",
+          "replace": "getEffectiveCredentials(){if(globalThis.__bridgeDockLocal)return globalThis.__bridgeDockCredentials(this.reactiveStorageService.applicationUserPersistentStorage.cursorCreds);"
+        },
+        {
+          "find": "clearLocalSession(e){",
+          "replace": "clearLocalSession(e){if(globalThis.__bridgeDockLocal)return;"
+        },
+        {
+          "find": "this.storeAccessRefreshToken=(o,a)=>{",
+          "replace": "this.storeAccessRefreshToken=(o,a)=>{if(globalThis.__bridgeDockLocal)return;"
+        },
+        {
+          "find": "this.storeEmailAndSignUpType=(o,a)=>{",
+          "replace": "this.storeEmailAndSignUpType=(o,a)=>{if(globalThis.__bridgeDockLocal)return;"
+        },
+        {
+          "find": "this.clearStoredEmailAndSignUpType=()=>{",
+          "replace": "this.clearStoredEmailAndSignUpType=()=>{if(globalThis.__bridgeDockLocal)return;"
+        },
+        {
+          "find": "function pCt(e){",
+          "replace": "function pCt(e){e=globalThis.__bridgeDockModelSection(e);"
+        },
+        {
+          "find": "function oMu(e,t){",
+          "replace": "function oMu(e,t){if(globalThis.__bridgeDockModelMatches(e,t))return!0;"
+        },
+        {
+          "find": "function r2u(e){",
+          "replace": "function r2u(e){e=globalThis.__bridgeDockPickerLayout(e);"
+        },
+        {
+          "find": "y.current=n,!M&&n&&c()",
+          "replace": "y.current=n,!M&&n&&(c(),globalThis.__bridgeDockSyncModels())"
+        },
+        {
+          "find": "{searchPlaceholder:\"Search models\",noModelsFound:\"No models found\",modelSelection:\"Model selection\",countOptions:\"Count options\",restoreDefaultParameters:\"Restore default parameters\",editParameters:\"Edit\"}",
+          "replace": "globalThis.__bridgeDockPickerLabels({searchPlaceholder:\"Search models\",noModelsFound:\"No models found\",modelSelection:\"Model selection\",countOptions:\"Count options\",restoreDefaultParameters:\"Restore default parameters\",editParameters:\"Edit\"})"
+        },
+        {
+          "find": "computeAvailableDefaultModels(){",
+          "replace": "computeAvailableDefaultModels(){if(globalThis.__bridgeDockLocal){this.reactiveStorageService.availableModelsCatalogRevision();return(this.reactiveStorageService.applicationUserPersistentStorage.availableDefaultModels2??[]).map(Osp);}"
+        }
+      ]
+    },
+    {
+      "name": "workbench.glass.main.js",
+      "patches": [
+        {
+          "find": "async refreshDefaultModels(){",
+          "replace": "async refreshDefaultModels(){globalThis.__bridgeDockRestoreModels(this);if(globalThis.__bridgeDockLocal){await globalThis.__bridgeDockRefreshModels(this,q$t);return;}",
+          "previousReplacements": [
+            "async refreshDefaultModels(){if(globalThis.__bridgeDockLocal){await globalThis.__bridgeDockRefreshModels(this,q$t);return;}"
+          ]
+        },
+        {
+          "find": "localMode:!1,restoresStoredServer:",
+          "replace": "localMode:!!globalThis.__bridgeDockLocal,restoresStoredServer:"
+        },
+        {
+          "find": "this.refreshToken=()=>this.storageService.get(\"cursorAuth/refreshToken\",-1)",
+          "replace": "this.refreshToken=()=>globalThis.__bridgeDockLocal?.token??this.storageService.get(\"cursorAuth/refreshToken\",-1)"
+        },
+        {
+          "find": "this.accessToken=()=>this.isSessionWithheld()?void 0:this.heldAccessToken()",
+          "replace": "this.accessToken=()=>globalThis.__bridgeDockLocal?.token??(this.isSessionWithheld()?void 0:this.heldAccessToken())"
+        },
+        {
+          "find": "isAuthenticated(){const t=this.accessToken()",
+          "replace": "isAuthenticated(){if(globalThis.__bridgeDockLocal)return true;const t=this.accessToken()"
+        },
+        {
+          "find": "async getEmailAndSignUpType(){",
+          "replace": "async getEmailAndSignUpType(){if(globalThis.__bridgeDockLocal)return {email:globalThis.__bridgeDockLocal.email,signUpType:\"unknown\"};"
+        },
+        {
+          "find": "this.getCachedAccountProfile=()=>{",
+          "replace": "this.getCachedAccountProfile=()=>{if(globalThis.__bridgeDockLocal)return {authId:globalThis.__bridgeDockLocal.id,displayName:globalThis.__bridgeDockLocal.name};"
+        },
+        {
+          "find": "this.refreshAccessToken=async(G=!1)=>{",
+          "replace": "this.refreshAccessToken=async(G=!1)=>{if(globalThis.__bridgeDockLocal)return;"
+        },
+        {
+          "find": "this.refreshMembership=async G=>{",
+          "replace": "this.refreshMembership=async G=>{if(globalThis.__bridgeDockLocal)return;"
+        },
+        {
+          "find": "async getAccessToken(){this.authDebugLog",
+          "replace": "async getAccessToken(){if(globalThis.__bridgeDockLocal)return globalThis.__bridgeDockLocal.token;this.authDebugLog"
+        },
+        {
+          "find": "async getLocalAgentProviderConfig(t,e){",
+          "replace": "async getLocalAgentProviderConfig(t,e){if(globalThis.__bridgeDockLocal)return {baseUrl:globalThis.__bridgeDockLocal.baseURL,apiKey:globalThis.__bridgeDockLocal.key,customHeaders:globalThis.__bridgeDockParameterHeaders()};",
+          "previousReplacements": [
+            "async getLocalAgentProviderConfig(t,e){if(globalThis.__bridgeDockLocal)return {baseUrl:globalThis.__bridgeDockLocal.baseURL,apiKey:globalThis.__bridgeDockLocal.key};"
+          ]
+        },
+        {
+          "find": "async getLocalInferenceProviderConfig(){",
+          "replace": "async getLocalInferenceProviderConfig(){if(globalThis.__bridgeDockLocal)return {baseUrl:globalThis.__bridgeDockLocal.baseURL,apiKey:globalThis.__bridgeDockLocal.key,customHeaders:globalThis.__bridgeDockParameterHeaders(),userAgent:\"BridgeDock\",modelId:globalThis.__bridgeDockLocal.model};",
+          "previousReplacements": [
+            "async getLocalInferenceProviderConfig(){if(globalThis.__bridgeDockLocal)return {baseUrl:globalThis.__bridgeDockLocal.baseURL,apiKey:globalThis.__bridgeDockLocal.key,userAgent:\"BridgeDock\",modelId:globalThis.__bridgeDockLocal.model};"
+          ]
+        },
+        {
+          "find": "get skipOnboarding(){return this.payload",
+          "replace": "get skipOnboarding(){if(globalThis.__bridgeDockLocal)return true;return this.payload"
+        },
+        {
+          "find": "this.getCurrentAuthId=()=>{",
+          "replace": "this.getCurrentAuthId=()=>{if(globalThis.__bridgeDockLocal)return globalThis.__bridgeDockLocal.id;"
+        },
+        {
+          "find": "this.getScopedDashboardProfile=async G=>{",
+          "replace": "this.getScopedDashboardProfile=async G=>{if(globalThis.__bridgeDockLocal)return {firstName:globalThis.__bridgeDockLocal.name,lastName:\"\",teamName:\"\",authId:globalThis.__bridgeDockLocal.id,email:globalThis.__bridgeDockLocal.email};"
+        },
+        {
+          "find": "getEffectiveCredentials(){",
+          "replace": "getEffectiveCredentials(){if(globalThis.__bridgeDockLocal)return globalThis.__bridgeDockCredentials(this.reactiveStorageService.applicationUserPersistentStorage.cursorCreds);"
+        },
+        {
+          "find": "clearLocalSession(t){",
+          "replace": "clearLocalSession(t){if(globalThis.__bridgeDockLocal)return;"
+        },
+        {
+          "find": "this.storeAccessRefreshToken=(o,a)=>{",
+          "replace": "this.storeAccessRefreshToken=(o,a)=>{if(globalThis.__bridgeDockLocal)return;"
+        },
+        {
+          "find": "this.storeEmailAndSignUpType=(o,a)=>{",
+          "replace": "this.storeEmailAndSignUpType=(o,a)=>{if(globalThis.__bridgeDockLocal)return;"
+        },
+        {
+          "find": "this.clearStoredEmailAndSignUpType=()=>{",
+          "replace": "this.clearStoredEmailAndSignUpType=()=>{if(globalThis.__bridgeDockLocal)return;"
+        },
+        {
+          "find": "function xBx(t){",
+          "replace": "function xBx(t){if(globalThis.__bridgeDockLocal){const header=t.agentHeader??t.fallbackHeader;const environment=header?.targetEnvironment.type===\"existing\"?header.targetEnvironment:{type:\"existing\",environment:t.homeWorkspaceIdentifier};return UQ(environment,t.cloudProjects,t.workspaceMetadataService,[]);}"
+        },
+        {
+          "find": "isEnabled(){return this._spaceXModeService.state.kind!==\"off\"}",
+          "replace": "isEnabled(){if(globalThis.__bridgeDockLocal)return false;return this._spaceXModeService.state.kind!==\"off\"}"
+        },
+        {
+          "find": "getLastNewProjectRuntime(){return this._lastNewProjectRuntime}",
+          "replace": "getLastNewProjectRuntime(){if(globalThis.__bridgeDockLocal)return \"local\";return this._lastNewProjectRuntime}"
+        },
+        {
+          "find": "function OYt(t){",
+          "replace": "function OYt(t){t=globalThis.__bridgeDockModelSection(t);"
+        },
+        {
+          "find": "function aVp(t,e){",
+          "replace": "function aVp(t,e){if(globalThis.__bridgeDockModelMatches(t,e))return!0;"
+        },
+        {
+          "find": "function aZp(t){",
+          "replace": "function aZp(t){t=globalThis.__bridgeDockPickerLayout(t);"
+        },
+        {
+          "find": "b.current=n,!T&&n&&l()",
+          "replace": "b.current=n,!T&&n&&(l(),globalThis.__bridgeDockSyncModels())"
+        },
+        {
+          "find": "{searchPlaceholder:\"Search models\",noModelsFound:\"No models found\",modelSelection:\"Model selection\",countOptions:\"Count options\",restoreDefaultParameters:\"Restore default parameters\",editParameters:\"Edit\"}",
+          "replace": "globalThis.__bridgeDockPickerLabels({searchPlaceholder:\"Search models\",noModelsFound:\"No models found\",modelSelection:\"Model selection\",countOptions:\"Count options\",restoreDefaultParameters:\"Restore default parameters\",editParameters:\"Edit\"})"
+        },
+        {
+          "find": "computeAvailableDefaultModels(){",
+          "replace": "computeAvailableDefaultModels(){if(globalThis.__bridgeDockLocal){this.reactiveStorageService.availableModelsCatalogRevision();return(this.reactiveStorageService.applicationUserPersistentStorage.availableDefaultModels2??[]).map(Yug);}"
+        }
+      ]
+    },
+    {
+      "name": "extensions/cursor-agent-exec/dist/main.js",
+      "scope": "app",
+      "patches": [
+        {
+          "find": "configuredEffortValues:e.configuredEffortValues,requestLogMetadata:e.requestLogMetadata",
+          "replace": "configuredEffortValues:e.configuredEffortValues??(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"1\"?s.reasoningEffortValues??[\"low\",\"medium\",\"high\",\"xhigh\",\"max\"]:void 0),requestLogMetadata:e.requestLogMetadata"
+        },
+        {
+          "find": "async function Ize(e){",
+          "replace": "async function Ize(e){if(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"0\")e={...e,modelParameters:e.modelParameters?.filter(p=>![\"context\",\"reasoning\",\"effort\",\"thought_level\"].includes(p.id))};"
+        }
+      ]
+    },
+    {
+      "name": "extensions/cursor-local-agent-runtime/dist/main.js",
+      "scope": "app",
+      "patches": [
+        {
+          "find": "configuredEffortValues:e.configuredEffortValues,requestLogMetadata:e.requestLogMetadata",
+          "replace": "configuredEffortValues:e.configuredEffortValues??(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"1\"?o.reasoningEffortValues??[\"low\",\"medium\",\"high\",\"xhigh\",\"max\"]:void 0),requestLogMetadata:e.requestLogMetadata"
+        },
+        {
+          "find": "async function j8e(e){",
+          "replace": "async function j8e(e){if(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"0\")e={...e,modelParameters:e.modelParameters?.filter(p=>![\"context\",\"reasoning\",\"effort\",\"thought_level\"].includes(p.id))};"
+        }
+      ]
+    }
+  ]
+}

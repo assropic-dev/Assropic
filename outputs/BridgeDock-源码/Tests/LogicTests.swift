@@ -42,6 +42,13 @@ struct LogicTests {
         let roundTrip = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(loaded))
         check(roundTrip.channels == loaded.channels && roundTrip.managementKey == "m-old", "state round trip")
 
+        let desktop = ConnectionProfile(tool: .claudeDesktop, baseURL: "http://127.0.0.1:19417", key: "local-key", model: "mock/test-model")
+        check(desktop.tool.file == nil && desktop.command.isEmpty, "Desktop does not write or launch Claude Code configuration")
+        check(desktop.snippet.contains("Gateway base URL      http://127.0.0.1:19417\n"), "Desktop uses Anthropic gateway root")
+        check(desktop.snippet.contains("Bearer") && desktop.snippet.contains("mock/test-model"), "Desktop gateway authentication and model")
+        check(try JSONDecoder().decode(EditingAgent.self, from: Data(#""Claude Code""#.utf8)) == .claude, "Existing CLI launcher preference remains compatible")
+        check(try JSONDecoder().decode(EditingAgent.self, from: Data(#""Claude""#.utf8)) == .claudeDesktop, "Desktop launcher has a separate persisted identity")
+
         let claude = ConnectionProfile(tool: .claude, baseURL: "http://127.0.0.1:19417", key: "local-key", model: "mock/test-model")
         let existing = Data(#"{"env":{"OTHER":"preserve","ANTHROPIC_API_KEY":"old"},"permissions":{"allow":["Read"]},"custom":{"nested":true}}"#.utf8)
         let merged = try JSONSerialization.jsonObject(with: claude.merged(with: existing)) as! [String: Any]
@@ -91,8 +98,9 @@ struct LogicTests {
         check(permissions == 0o600, "private file permissions")
 
         var settings = AppSettings()
-        settings.port = 19417
+        settings.port = 19415
         settings.clientKey = "local-test-key"
+        settings.coreClientKey = "local-test-key"
         settings.managementKey = "management-test-key"
         settings.channels = [channel]
         let config = settings.coreConfig(dataDirectory: scratch, pluginDirectory: scratch.appendingPathComponent("plugins"))

@@ -1,0 +1,5 @@
+Kimi Work protocol and desktop-session integration reference:
+https://github.com/keenlin/magpie-plugins/tree/3e966bb4b5f21b9b3d1cbe6c4d15cca8fbf32fe9/packages/kimi-work
+Package version: 0.1.4. MIT license retained as KimiWork-LICENSE.
+BridgeDock uses its native Swift implementation and the existing local proxy core.
+This is an undocumented desktop interface, not an official public Work API.

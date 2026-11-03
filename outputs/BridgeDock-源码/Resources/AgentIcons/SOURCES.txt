@@ -1,0 +1,10 @@
+Brand artwork used to identify the corresponding integrations; trademarks belong to their owners.
+
+cursor.png: /Applications/Cursor.app, macOS application icon.
+claude.png: /Applications/Claude.app, macOS application icon; shared by Claude and Claude Code.
+codex.png: /Applications/ChatGPT.app/Contents/Resources/icon-codex-light.png (Codex artwork, not the ChatGPT icon).
+kimi.png: /Applications/Kimi.app, macOS application icon.
+kiro.png: /Applications/Kiro CLI.app, macOS application icon.
+zcode.png: https://zcode.z.ai/favicon-192x192.png?v=20260707-transparent
+
+Application icons exported with NSWorkspace as 128-pixel PNGs. Original artwork is retained.

@@ -2,10 +2,12 @@ import Foundation
 import CryptoKit
 
 enum ClientTool: String, CaseIterable, Identifiable {
-    case claude = "Claude Code", codex = "Codex CLI", kimi = "Kimi Code", zcode = "ZCode", kiro = "Kiro", generic = "其他工具"
+    case cursor = "Cursor", claudeDesktop = "Claude", claude = "Claude Code", codex = "Codex CLI", kimi = "Kimi Code", zcode = "ZCode", kiro = "Kiro", generic = "其他工具"
     var id: String { rawValue }
     var symbol: String {
         switch self {
+        case .cursor: return "cursorarrow.rays"
+        case .claudeDesktop: return "desktopcomputer"
         case .claude: return "terminal"
         case .codex: return "curlybraces"
         case .kimi: return "moon.stars"
@@ -39,6 +41,17 @@ struct ConnectionProfile {
 
     var snippet: String {
         switch tool {
+        case .cursor:
+            return "在 Cursor 接入页打开“使用 BD 反代”开关即可使用 BridgeDock 模型；关闭开关后使用原来的 Cursor 官方账号。切换时会正常重启 Cursor。"
+        case .claudeDesktop:
+            return """
+            Inference provider    Gateway
+            Credential kind       Static API key
+            Gateway base URL      \(baseURL)
+            Gateway API key       \(key)
+            Gateway auth scheme   Bearer
+            Model ID              \(model)
+            """
         case .claude:
             return String(decoding: try! jsonData(["env": claudeEnvironment]), as: UTF8.self)
         case .codex:
@@ -85,9 +98,14 @@ struct ConnectionProfile {
     }
 
     var command: String {
+        launchCommand(executable: nil)
+    }
+
+    func launchCommand(executable: String?) -> String {
+        let selectedExecutable = executable.map(shellQuote)
         switch tool {
         case .claude:
-            return "env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_USE_BEDROCK -u CLAUDE_CODE_USE_VERTEX -u CLAUDE_CODE_USE_FOUNDRY " + claudeEnvironment.sorted { $0.key < $1.key }.map { $0.key + "=" + shellQuote($0.value) }.joined(separator: " ") + " claude"
+            return "env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_USE_BEDROCK -u CLAUDE_CODE_USE_VERTEX -u CLAUDE_CODE_USE_FOUNDRY " + claudeEnvironment.sorted { $0.key < $1.key }.map { $0.key + "=" + shellQuote($0.value) }.joined(separator: " ") + " " + (selectedExecutable ?? "claude")
         case .codex:
             let values = ["model=" + tomlQuote(model), "model_provider=\"bridgedock\"",
                           "model_providers.bridgedock.name=\"BridgeDock\"",
@@ -96,8 +114,8 @@ struct ConnectionProfile {
                           "model_providers.bridgedock.requires_openai_auth=false",
                           "model_providers.bridgedock.supports_websockets=false",
                           "model_providers.bridgedock.experimental_bearer_token=" + tomlQuote(key)]
-            return "codex " + values.map { "-c " + shellQuote($0) }.joined(separator: " ")
-        case .kimi: return "kimi -m bridgedock"
+            return (selectedExecutable ?? "codex") + " " + values.map { "-c " + shellQuote($0) }.joined(separator: " ")
+        case .kimi: return (selectedExecutable ?? "kimi") + " -m bridgedock"
         default: return ""
         }
     }
@@ -202,6 +220,8 @@ struct ConfigurationInstaller {
         let existed = files.fileExists(atPath: destination.path)
         let before = existed ? try Data(contentsOf: destination) : nil
         let after = try profile.merged(with: before)
+        // An unchanged file needs no new backup; repeated launches would otherwise bury the original.
+        if before == after { return }
         var entries = try history()
         var backup: URL?
         if let before {
