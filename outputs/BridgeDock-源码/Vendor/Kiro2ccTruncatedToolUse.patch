@@ -1,0 +1,155 @@
+diff --git a/src/anthropic/handlers/stream.rs b/src/anthropic/handlers/stream.rs
+index fbe582e..23ce71c 100644
+--- a/src/anthropic/handlers/stream.rs
++++ b/src/anthropic/handlers/stream.rs
+@@ -552,7 +552,16 @@ fn create_sse_stream(
+ 
+                             // 非桥接态（或桥接无待执行搜索）→ 现有收尾路径（零行为变化）
+                             let mut out_events = Vec::new();
+-                            if ctx.is_empty_response() {
++                            if let Some(tool_use_id) = ctx.truncated_tool_use() {
++                                let elapsed = stream_started_at.elapsed();
++                                tracing::warn!(
++                                    tool_use_id = %tool_use_id,
++                                    est_input_tokens = ctx.input_tokens,
++                                    stream_elapsed_secs = elapsed.as_secs(),
++                                    "上游在工具调用参数未完成时结束了流（无 stop、无 meteringEvent），补发 error 事件防止半截工具调用被执行"
++                                );
++                                out_events.push(stream_interrupted_error_event_after(elapsed));
++                            } else if ctx.is_empty_response() {
+                                 let oversized = ctx.empty_response_is_oversized_context();
+                                 tracing::warn!(
+                                     oversized_context = oversized,
+diff --git a/src/anthropic/stream/context/metrics.rs b/src/anthropic/stream/context/metrics.rs
+index d36d615..6836aa1 100644
+--- a/src/anthropic/stream/context/metrics.rs
++++ b/src/anthropic/stream/context/metrics.rs
+@@ -38,6 +38,23 @@ impl StreamContext {
+         crate::token::count_tokens(&self.thinking_full_text) as i32
+     }
+ 
++    /// 上游在工具调用参数输出到一半时就结束了流，返回该工具调用的 id。
++    ///
++    /// 三个条件同时成立才算：该工具调用没收到 stop、已收到的参数不是完整 JSON、
++    /// 整条流没有 meteringEvent（正常完成的流都会带）。实测 Kiro 会这样干净地 EOF，
++    /// 读流不报错；若照常收尾，客户端会拿到 `tool_calls` 结束原因并执行半截参数的
++    /// 工具调用，再把这段残缺历史带进下一轮，之后上游对该会话持续返回空响应。
++    pub fn truncated_tool_use(&self) -> Option<&str> {
++        if self.metering_usage.is_some() {
++            return None;
++        }
++        self.unfinished_tool_inputs
++            .iter()
++            .filter(|(_, input)| serde_json::from_str::<serde_json::Value>(input).is_err())
++            .map(|(id, _)| id.as_str())
++            .min()
++    }
++
+     /// 检测上游是否返回了无效的空/近似空响应。
+     ///
+     /// 两种判定路径：
+diff --git a/src/anthropic/stream/context/mod.rs b/src/anthropic/stream/context/mod.rs
+index a645859..d5e2768 100644
+--- a/src/anthropic/stream/context/mod.rs
++++ b/src/anthropic/stream/context/mod.rs
+@@ -1,5 +1,5 @@
+ //! StreamContext 主结构：聚合单次流式请求的全部状态（事件缓冲、块状态、usage 统计），是 SSE 状态机的上下文载体。
+-use std::collections::HashMap;
++use std::collections::{HashMap, HashSet};
+ use std::sync::Arc;
+ use std::time::Instant;
+ 
+@@ -42,6 +42,10 @@ pub struct StreamContext {
+     pub thinking_full_text: String,
+     /// 工具块索引映射 (tool_id -> block_index)
+     pub tool_block_indices: HashMap<String, i32>,
++    /// 尚未收到 stop 的工具调用已累计的参数 (tool_id -> input)。见 `truncated_tool_use()`
++    pub unfinished_tool_inputs: HashMap<String, String>,
++    /// 已收到 stop 的工具调用；其后迟到的帧不再计入 `unfinished_tool_inputs`
++    pub finished_tool_ids: HashSet<String>,
+     /// thinking 是否启用
+     pub thinking_enabled: bool,
+     /// thinking 内容缓冲区
+@@ -129,6 +133,8 @@ impl StreamContext {
+             visible_full_text: String::new(),
+             thinking_full_text: String::new(),
+             tool_block_indices: HashMap::new(),
++            unfinished_tool_inputs: HashMap::new(),
++            finished_tool_ids: HashSet::new(),
+             thinking_enabled,
+             thinking_buffer: String::new(),
+             in_thinking_block: false,
+@@ -897,6 +903,18 @@ impl StreamContext {
+             }
+         }
+ 
++        // 跟踪参数是否收齐：上游可能在参数输出到一半时干净地结束流（无 stop、无 meteringEvent），
++        // 收尾时据此改发流中断 error，而不是把半截工具调用当作正常完成交给客户端执行
++        if tool_use.stop {
++            self.unfinished_tool_inputs.remove(&tool_use.tool_use_id);
++            self.finished_tool_ids.insert(tool_use.tool_use_id.clone());
++        } else if !self.finished_tool_ids.contains(&tool_use.tool_use_id) {
++            self.unfinished_tool_inputs
++                .entry(tool_use.tool_use_id.clone())
++                .or_default()
++                .push_str(&tool_use.input);
++        }
++
+         // 如果是完整的工具调用（stop=true），发送 content_block_stop
+         if tool_use.stop
+             && let Some(stop_event) = self.state_manager.handle_content_block_stop(block_index)
+diff --git a/src/anthropic/stream/tests/context.rs b/src/anthropic/stream/tests/context.rs
+index a991a32..af297c9 100644
+--- a/src/anthropic/stream/tests/context.rs
++++ b/src/anthropic/stream/tests/context.rs
+@@ -675,4 +675,50 @@ mod tests {
+             collect_text(&out)
+         );
+     }
++
++    // ===== 半截工具调用（上游在参数未完成时干净 EOF）=====
++
++    fn tool_event(id: &str, input: &str, stop: bool) -> ToolUseEvent {
++        ToolUseEvent {
++            name: "edit_file_v2".to_string(),
++            tool_use_id: id.to_string(),
++            input: input.to_string(),
++            stop,
++        }
++    }
++
++    #[test]
++    fn test_truncated_tool_use_detected() {
++        // 实测：参数停在路径中间，既无 stop 也无 meteringEvent
++        let mut ctx = StreamContext::new_with_thinking("test-model", 1, false);
++        ctx.process_kiro_event(&text_event("补上后重新编译。"));
++        ctx.process_tool_use(&tool_event("toolu_cut", r#"{"path":"/Users/zhang"#, false));
++        assert_eq!(ctx.truncated_tool_use(), Some("toolu_cut"));
++        assert!(!ctx.is_empty_response(), "有内容的截断流不走空响应路径");
++    }
++
++    #[test]
++    fn test_completed_tool_use_not_truncated() {
++        // 分片到达、最后一片带 stop：正常完成
++        let mut ctx = StreamContext::new_with_thinking("test-model", 1, false);
++        ctx.process_tool_use(&tool_event("toolu_ok", r#"{"path":"/a","#, false));
++        ctx.process_tool_use(&tool_event("toolu_ok", r#""new_string":"x"}"#, true));
++        assert_eq!(ctx.truncated_tool_use(), None);
++        // stop 之后的迟到帧不应让它重新变成未完成
++        ctx.process_tool_use(&tool_event("toolu_ok", r#"{"late"#, false));
++        assert_eq!(ctx.truncated_tool_use(), None);
++    }
++
++    #[test]
++    fn test_unfinished_tool_use_with_metering_or_valid_json_is_kept() {
++        // 有 meteringEvent：上游已正常结算，不改写
++        let mut metered = StreamContext::new_with_thinking("test-model", 1, false);
++        metered.process_tool_use(&tool_event("toolu_m", r#"{"path":"/Us"#, false));
++        metered.process_kiro_event(&metering_event(0.5));
++        assert_eq!(metered.truncated_tool_use(), None);
++        // 缺 stop 但参数已是完整 JSON：工具调用可用，不改写
++        let mut whole = StreamContext::new_with_thinking("test-model", 1, false);
++        whole.process_tool_use(&tool_event("toolu_w", r#"{"path":"/a","new_string":"x"}"#, false));
++        assert_eq!(whole.truncated_tool_use(), None);
++    }
+ }

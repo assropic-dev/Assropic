@@ -212,6 +212,10 @@ Vendor/kiro2cc-proxy 由 Vendor/build-kiro2cc.sh 编译，构建时运行上游�
 reasoning_effort 接受 xhigh、max（原版会忽略，等于不开思考）；kiro2cc 把思考预算统一封顶在
 24576，所以这两档在 Kiro 上与 high 相同。BridgeDock 给 Kiro 的 Claude 模型声明 low–max 五档，
 合并模型里选思考强度时不会再被切到其他供应商；
+再打上 Vendor/Kiro2ccTruncatedToolUse.patch：上游有时在工具调用参数输出到一半时干净地结束流
+（没有 stop、没有 meteringEvent，读流也不报错），原版照常收尾，客户端拿到 tool_calls 结束原因后
+执行半截参数的工具调用，残缺历史带进下一轮后上游对该会话持续返回空响应。补丁在这种情况下
+改发“流中断”error，客户端按出错重试这一轮；
 内置管理网页用空页面替代，BridgeDock 不使用它。
 运行方式：
 • 内核启动后，BridgeDock 把 accounts/ 中的 Kiro 账号转换成 kiro-runtime/credentials.json，

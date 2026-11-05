@@ -17,6 +17,9 @@ cd "$SOURCE_DIR"
 # Kiro Free accounts can call Opus too (model-aware routing decides, not the plan name);
 # reasoning_effort also accepts xhigh and max.
 patch -p1 < "$VENDOR_DIR/Kiro2ccFreeOpus.patch"
+# A stream that ends cleanly mid tool-call arguments (no stop, no metering) is reported as
+# interrupted, so the client retries instead of running a half-written tool call.
+patch -p1 < "$VENDOR_DIR/Kiro2ccTruncatedToolUse.patch"
 # BridgeDock drives the admin API directly; the embedded web consoles stay empty.
 for ui in admin-ui user-ui; do
   mkdir -p "web-ui/$ui/dist"
