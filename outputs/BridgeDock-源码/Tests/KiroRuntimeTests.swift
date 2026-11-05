@@ -150,6 +150,15 @@ struct KiroRuntimeTests {
         check(ModelGateway.isUnreachable(URLError(.cannotConnectToHost)) && ModelGateway.isUnreachable(URLError(.networkConnectionLost))
               && !ModelGateway.isUnreachable(URLError(.timedOut)) && !ModelGateway.isUnreachable(URLError(.cancelled)),
               "only a kiro2cc that could not be reached is retried on the core")
+        check(ModelPublishing.kiroThinking(ModelCapability(contextLength: 1_000_000), owner: "kiro", name: "claude-opus-5.5")?.reasoningEfforts
+              == ["low", "medium", "high", "xhigh", "max"], "Kiro's Claude models advertise every thinking level kiro2cc accepts")
+        check(ModelPublishing.kiroThinking(nil, owner: "Kiro", name: "claude-sonnet-4-6")?.reasoningEfforts?.count == 5,
+              "a Kiro Claude model without a known capability still gets thinking levels")
+        check(ModelPublishing.kiroThinking(ModelCapability(reasoningEfforts: ["high"]), owner: "kiro", name: "claude-opus-5.5")?.reasoningEfforts == ["high"],
+              "levels the core already lists for a Kiro model are kept")
+        check(ModelPublishing.kiroThinking(nil, owner: "kiro", name: "auto") == nil
+              && ModelPublishing.kiroThinking(nil, owner: "anthropic", name: "claude-opus-5-5") == nil,
+              "Kiro's auto model and other providers are left alone")
         print("PASS \(count) Kiro runtime assertions; no network or real credentials.")
     }
 }

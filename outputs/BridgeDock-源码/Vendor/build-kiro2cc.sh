@@ -14,7 +14,8 @@ printf '%s  %s\n' "$ARCHIVE_SHA" "$BUILD_DIR/upstream.tar.gz" | shasum -a 256 -c
 mkdir "$SOURCE_DIR"
 tar -xzf "$BUILD_DIR/upstream.tar.gz" -C "$SOURCE_DIR" --strip-components=1
 cd "$SOURCE_DIR"
-# Kiro Free accounts can call Opus too; let model-aware routing decide instead of the plan name.
+# Kiro Free accounts can call Opus too (model-aware routing decides, not the plan name);
+# reasoning_effort also accepts xhigh and max.
 patch -p1 < "$VENDOR_DIR/Kiro2ccFreeOpus.patch"
 # BridgeDock drives the admin API directly; the embedded web consoles stay empty.
 for ui in admin-ui user-ui; do

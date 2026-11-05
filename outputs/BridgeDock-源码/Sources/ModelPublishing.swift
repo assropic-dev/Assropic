@@ -109,6 +109,18 @@ enum ModelPublishing {
 
     /// Core definition sets by `owned_by`. Account models use their own vendor's set
     /// first, since the same model name can carry different limits through Kiro.
+    /// Thinking levels kiro2cc accepts on Kiro's Claude models (Vendor/Kiro2ccFreeOpus.patch adds xhigh and max).
+    static let kiroEfforts = ["low", "medium", "high", "xhigh", "max"]
+
+    /// The core's Kiro plugin lists Claude models without thinking levels, so a merged model's picker
+    /// treated Kiro as unable to think and switched to another provider as soon as a level was chosen.
+    static func kiroThinking(_ capability: ModelCapability?, owner: String, name: String) -> ModelCapability? {
+        guard owner.lowercased() == "kiro", name.lowercased().hasPrefix("claude-") else { return capability }
+        var value = capability ?? ModelCapability()
+        if value.reasoningEfforts?.isEmpty != false { value.reasoningEfforts = kiroEfforts }
+        return value
+    }
+
     static let definitionChannel = ["openai": "codex", "anthropic": "claude", "moonshot": "kimi", "google": "gemini"]
 
     /// Channel records win over core definitions; both are keyed by the upstream model
@@ -186,10 +198,16 @@ enum ModelPublishing {
             let workChannel = settings.channels.first { $0.isKimiWork && $0.enabled && raw.id.hasPrefix($0.prefix + "/") }
             let workName = workChannel?.models.first { $0["alias"] == name }?["name"] ?? name
             let workModel = workChannel?.workModels[workName]
-            let capability = workModel?.capability ?? cursorRoute?.capability ?? capability(for: raw, settings: settings, definitions: definitions)
-                ?? ModelCapability(definition: raw.metadata)
+            let capability = kiroThinking(workModel?.capability ?? cursorRoute?.capability ?? capability(for: raw, settings: settings, definitions: definitions)
+                ?? ModelCapability(definition: raw.metadata), owner: raw.owner, name: name)
             if let capability {
                 metadata.merge(capability.catalogFields) { current, provided in cursorRoute == nil ? current : provided }
+                if let efforts = capability.reasoningEfforts, raw.owner.lowercased() == "kiro" {
+                    // The core's Kiro definitions omit thinking; publish what kiro2cc accepts.
+                    var fields = metadata["capabilities"] as? [String: Any] ?? [:]
+                    fields["reasoning_effort"] = efforts; fields["supports_reasoning"] = true
+                    metadata["capabilities"] = fields
+                }
             }
             if let current = cursorRoute?.defaultEffort {
                 var fields = metadata["capabilities"] as? [String: Any] ?? [:]

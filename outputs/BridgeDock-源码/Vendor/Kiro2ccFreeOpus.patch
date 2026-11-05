@@ -159,3 +159,43 @@ index fdf1dd1..46c241b 100644
 +        assert_eq!(misses_after, misses_before);
      }
  }
+diff --git a/src/openai/chat_request.rs b/src/openai/chat_request.rs
+index 90c818c..73a781a 100644
+--- a/src/openai/chat_request.rs
++++ b/src/openai/chat_request.rs
+@@ -421,6 +421,10 @@ pub(super) fn convert_reasoning_effort(effort: Option<&Value>, max_tokens: i64)
+         "low" => 4096,
+         "medium" => 12000,
+         "high" => 24576,
++        // BridgeDock 补丁：Cursor 等客户端还会发 xhigh / max，按更大的预算处理，
++        // 随后统一按 max_tokens 收敛。
++        "xhigh" => 32768,
++        "max" => 63999,
+         // minimal / none 表示不要推理
+         "minimal" | "none" => return None,
+         other => {
+diff --git a/src/openai/responses_request/tests.rs b/src/openai/responses_request/tests.rs
+index 1c59ace..d1356c3 100644
+--- a/src/openai/responses_request/tests.rs
++++ b/src/openai/responses_request/tests.rs
+@@ -557,6 +557,20 @@ mod tests {
+         assert!(minimal.anthropic_body.get("thinking").is_none());
+     }
+ 
++    #[test]
++    fn xhigh_and_max_efforts_get_larger_budgets_capped_by_max_tokens() {
++        use crate::openai::chat_request::convert_reasoning_effort;
++        let budget = |effort: &str, max_tokens: i64| {
++            convert_reasoning_effort(Some(&json!(effort)), max_tokens).map(|v| v["budget_tokens"].as_i64().unwrap())
++        };
++        assert_eq!(budget("xhigh", 64000), Some(32768));
++        assert_eq!(budget("max", 64000), Some(63999));
++        assert_eq!(budget("max", 32000), Some(31999));
++        assert_eq!(budget("xhigh", 32000), Some(31999));
++        assert_eq!(budget("high", 32000), Some(24576));
++        assert_eq!(budget("bogus", 32000), None);
++    }
++
+     #[test]
+     fn encrypted_content_include_is_ignored() {
+         let r = convert_ok(json!({
