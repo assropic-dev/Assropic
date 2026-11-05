@@ -40,11 +40,32 @@ class Core(BaseHTTPRequestHandler):
             self.send_response(200); self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(data))); self.end_headers(); self.wfile.write(data)
 
+kiro_seen = []
+
+class Kiro(BaseHTTPRequestHandler):
+    """Stands in for kiro2cc-proxy: streams Anthropic events with a pause between them."""
+    protocol_version = 'HTTP/1.1'
+    def log_message(self, *args): pass
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        kiro_seen.append((self.path, body, dict(self.headers)))
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/event-stream')
+        self.send_header('Connection', 'close')
+        self.end_headers()
+        self.wfile.write(b'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"kiro-first"}}\n\n')
+        self.wfile.flush()
+        time.sleep(.7)
+        self.wfile.write(b'event: message_stop\ndata: {"type":"message_stop"}\n\n'); self.wfile.flush()
+        self.close_connection = True
+
 core = ThreadingHTTPServer(('127.0.0.1', 0), Core)
 threading.Thread(target=core.serve_forever, daemon=True).start()
+kiro = ThreadingHTTPServer(('127.0.0.1', 0), Kiro)
+threading.Thread(target=kiro.serve_forever, daemon=True).start()
 with socket.socket() as reserve:
     reserve.bind(('127.0.0.1', 0)); port = reserve.getsockname()[1]
-process = subprocess.Popen([sys.argv[1], str(port), str(core.server_port)], stdout=subprocess.PIPE, text=True)
+process = subprocess.Popen([sys.argv[1], str(port), str(core.server_port), str(kiro.server_port)], stdout=subprocess.PIPE, text=True)
 count = 0
 
 def check(condition, label):
@@ -66,8 +87,91 @@ def call(path, body=None, key='public-test-key', headers=None, chunks=False):
 try:
     assert process.stdout.readline().strip() == 'READY'
     status, data = call('/v1/models')
-    rows = json.loads(data)['data']; model = rows[0]['id']
-    check(status == 200 and len(rows) == 1 and model == '测试渠道/model-a', 'only selected model is published using first four channel characters')
+    rows = json.loads(data)['data']
+    kiro_ids = sorted(r['id'] for r in rows if any(p['name'] == 'Kiro' for p in r['bridgedock_parameters']['providers']))
+    opus = next(r for r in rows if r['id'] == 'claude-opus-5-5')
+    kiro_provider = next(p['id'] for p in opus['bridgedock_parameters']['providers'] if p['name'] == 'Kiro')
+    cursor_model = next(r for r in rows if r['owned_by'] == 'Cursor')
+    rows = [r for r in rows if r['owned_by'] not in ('Kiro', 'Cursor', 'Claude')]; model = rows[0]['id']
+    check(status == 200 and len(rows) == 1 and model == 'model-a', 'only selected model is published under its bare ID')
+    check(cursor_model['id'] == 'gpt', 'Cursor effort variants publish as one base ID')
+    picker = cursor_model['bridgedock_parameters']
+    check(picker['version'] == 2 and [d['id'] for d in picker['definitions']] == ['fast', 'reasoning', 'provider'],
+          'version 2 definitions: untested channels publish no context tiers')
+    check(len(picker['providers']) == 2 and picker['providers'][1]['id'] == 'channel:gpt-relay'
+          and picker['providers'][1]['reasoning_effort'] == ['medium'] and cursor_model['owned_by'] == 'Cursor',
+          'same-name models from two sources merge with a providers list')
+    check(sum(1 for r in json.loads(data)['data'] if r['id'] == 'gpt') == 1, 'merged model appears once')
+    check(len(kiro_ids) == 2, 'Kiro models are published through the gateway catalog')
+    check([p['name'] for p in opus['bridgedock_parameters']['providers']] == ['Claude', 'Kiro'],
+          'Claude and Kiro version spellings share one picker entry')
+    check(opus['bridgedock_parameters']['providers'][0]['context_options'] == [],
+          'context tiers come only from long-context test results')
+    check(cursor_model['capabilities']['reasoning_effort'] == ['low', 'high']
+          and cursor_model['capabilities']['reasoning_default'] == 'low', 'Cursor catalog advertises its exact selectable efforts and default')
+    for path, parameter in [('/v1/chat/completions', {'reasoning_effort': 'high'}),
+                            ('/v1/responses', {'reasoning': {'effort': 'high'}}),
+                            ('/v1/messages', {'output_config': {'effort': 'high'}})]:
+        status, data = call(path, {'model': cursor_model['id'], **parameter})
+        check(status == 200 and json.loads(data)['model'] == 'cursor-fixture/gpt-high', path + ' maps chosen Cursor effort to the exact account variant')
+    status, data = call('/v1/chat/completions', {'model': cursor_model['id']})
+    check(status == 200 and json.loads(data)['model'] == 'cursor-fixture/gpt-low', 'Cursor default effort retains the chosen model variant')
+    requests_before = len(seen)
+    check(call('/v1/chat/completions', {'model': cursor_model['id'], 'reasoning_effort': 'max'})[0] == 400
+          and len(seen) == requests_before, 'Unsupported Cursor effort fails before any upstream call')
+    def native_headers(parameters):
+        return {'X-BridgeDock-Parameters': urllib.parse.quote(json.dumps([
+            {'id': key, 'value': value} for key, value in parameters.items()]))}
+    for path in ['/v1/chat/completions', '/v1/responses', '/v1/messages']:
+        status, data = call(path, {'model': cursor_model['id']}, headers=native_headers({'reasoning': 'high', 'fast': 'true'}))
+        check(status == 200 and json.loads(data)['model'] == 'cursor-fixture/gpt-high-fast', 'Native parameter header selects exact Fast and Effort variant')
+        check('x-bridgedock-parameters' not in {key.lower() for key in seen[-1][2]}, 'Local parameter header is consumed before forwarding')
+    before = len(seen)
+    check(call('/v1/responses', {'model': cursor_model['id']}, headers=native_headers({'reasoning': 'low', 'fast': 'true'}))[0] == 400
+          and len(seen) == before, 'Unsupported native combination does not silently downgrade')
+    status, _ = call('/v1/responses', {'model': model}, headers=native_headers({'reasoning': 'ultra'}))
+    check(status == 200 and 'reasoning' not in seen[-1][1], 'Unadvertised reasoning level falls back to the provider default')
+    check(call('/v1/responses', {'model': model}, headers={'X-BridgeDock-Parameters': '%BAD'})[0] == 400,
+          'Malformed parameter header is rejected')
+    check(call('/v1/responses', {'model': model}, headers=native_headers({'context': '32768'}))[0] == 200,
+          'Context returned directly by a provider is accepted without a static definition')
+    check(call('/v1/responses', {'model': model}, headers=native_headers({'context': '65536'}))[0] == 200,
+          'Context above the provider limit falls back to the provider default')
+    relay = next(p['id'] for p in picker['providers'] if p['id'] == 'channel:gpt-relay')
+    status, data = call('/v1/chat/completions', {'model': 'gpt'}, headers=native_headers({'provider': relay, 'reasoning': 'high'}))
+    check(status == 200 and json.loads(data)['model'] == 'relay/gpt' and 'reasoning_effort' not in seen[-1][1],
+          'provider parameter selects the channel and drops an effort it does not declare')
+    status, data = call('/v1/chat/completions', {'model': 'gpt'}, headers=native_headers({'reasoning': 'high'}))
+    check(status == 200 and json.loads(data)['model'] == 'cursor-fixture/gpt-high', 'missing provider selects the first source')
+    check(call('/v1/chat/completions', {'model': 'gpt'}, headers=native_headers({'provider': 'gone'}))[0] == 400,
+          'unknown provider is rejected')
+    pooled = next(i for i in kiro_ids if i.endswith('claude-opus-5-5'))
+    unprefixed = next(i for i in kiro_ids if i.endswith('claude-sonnet-5-5'))
+    before = len(seen)
+    conn = http.client.HTTPConnection('127.0.0.1', port, timeout=4)
+    started = time.monotonic()
+    conn.request('POST', '/v1/messages', json.dumps({'model': pooled, 'stream': True, 'max_tokens': 8, 'messages': []}),
+                 {'Authorization': 'Bearer public-test-key', 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01',
+                  **native_headers({'provider': kiro_provider, 'context': '131072'})})
+    response = conn.getresponse()
+    first = response.readline() + response.readline()
+    check(b'kiro-first' in first and time.monotonic() - started < .6, 'Kiro SSE reaches the client before the runtime finishes')
+    check(b'message_stop' in response.read(), 'Kiro SSE completes intact'); conn.close()
+    path, sent, headers = kiro_seen[-1]
+    check(path == '/v1/messages' and sent['model'] == 'claude-opus-5.5', 'Kiro request reaches the runtime with the bare upstream model')
+    check(headers.get('Authorization') == 'Bearer kiro-pool-key', 'prefixed Kiro model uses its own pool key, never the public or core key')
+    check(len(seen) == before, 'Kiro inference does not pass through the core')
+    status, data = call('/v1/messages', {'model': pooled, 'messages': []}, headers=native_headers({'provider': 'provider:anthropic', 'context': '524288'}))
+    check(status == 200 and seen[-1][1]['model'] == 'claude-opus-5-5', 'same picker model selects the Claude upstream independently')
+    status, _ = call('/v1/messages', {'model': 'claude-opus-5.5', 'messages': []})
+    check(status == 200 and kiro_seen[-1][1]['model'] == 'claude-opus-5.5', 'old dotted public ID retains its Kiro route')
+    status, _ = call('/v1/chat/completions', {'model': unprefixed, 'messages': []})
+    check(status == 200 and kiro_seen[-1][0] == '/v1/chat/completions' and kiro_seen[-1][1]['model'] == 'claude-sonnet-5.5'
+          and kiro_seen[-1][2].get('Authorization') == 'Bearer kiro-default-key', 'unprefixed Kiro model uses the default runtime key')
+    kiro_count = len(kiro_seen)
+    status, _ = call('/v1/embeddings', {'model': pooled, 'input': 'x'}, headers=native_headers({'provider': kiro_provider}))
+    check(status == 200 and len(kiro_seen) == kiro_count and seen[-1][1]['model'] == 'kiro/claude-opus-5.5',
+          'endpoints kiro2cc does not serve stay on the core')
     check(rows[0]['context_length'] == 32768, 'upstream model metadata is preserved')
     check(call('/v1/models', key='wrong')[0] == 401, 'public key is mandatory')
     check(call('/v1/models', key='internal-test-key')[0] == 401, 'internal key is not a public credential')
@@ -127,3 +231,4 @@ try:
 finally:
     process.terminate(); process.wait(timeout=5)
     core.shutdown(); core.server_close()
+    kiro.shutdown(); kiro.server_close()

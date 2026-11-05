@@ -11,7 +11,8 @@ enum LocalSubscriptionIdentity {
         let accessAuth = accessClaims["https://api.openai.com/auth"] as? [String: Any] ?? [:]
         let candidates: [Any?] = [document["account_id"], auth["chatgpt_account_id"], accessAuth["chatgpt_account_id"],
                                   document["profileArn"], document["profile_arn"],
-                                  claims["sub"], accessClaims["sub"], document["email"]]
+                                  claims["sub"], accessClaims["sub"], document["email"],
+                                  document["local_identity"]]
         return candidates.compactMap { $0 as? String }.first { !$0.isEmpty }
     }
 

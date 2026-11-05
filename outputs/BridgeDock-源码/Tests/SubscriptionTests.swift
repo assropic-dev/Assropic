@@ -70,6 +70,39 @@ struct SubscriptionTests {
         check(Account(["provider": "cursor-agent-v1"]).providerTitle == "Cursor",
               "Legacy Cursor credentials without a profile retain their display name")
 
+        func sessionToken(subject: String = "auth0|user_fixture", expiry: Double = Date().addingTimeInterval(3600).timeIntervalSince1970) throws -> String {
+            let payload = try jsonData(["sub": subject, "exp": expiry]).base64EncodedString()
+                .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+            return "eyJhbGciOiJIUzI1NiJ9." + payload + ".fixture"
+        }
+        let sessionJWT = try sessionToken()
+        for text in ["test@example.invalid----user_fixture::" + sessionJWT, "user_fixture::" + sessionJWT,
+                     "WorkosCursorSessionToken=user_fixture%3A%3A" + sessionJWT, sessionJWT] {
+            let parsed = try CursorSessionCredential(text)
+            check(parsed.userID == "user_fixture" && parsed.subject == "auth0|user_fixture", "Session formats retain the same account identity")
+            check(try parsed.verifiedEmail(["sub": "user_fixture", "email": "test@example.invalid"]) == "test@example.invalid",
+                  "Remote Cursor profile confirms pasted session identity")
+            let credential = try CursorAccountProfile.cursor.credential(label: "工作", key: text, prefix: "cursor2")
+            check(credential["auth_method"] as? String == "session" && credential["api_key"] == nil,
+                  "Pasted sessions never become API keys")
+            check(credential["access_token"] as? String == sessionJWT && credential["runtime_profile"] as? String == "agent_v1",
+                  "Session credentials select the Cursor transport")
+            check(try object(CredentialImport.normalized(jsonData(credential)))["account_id"] as? String == parsed.subject,
+                  "Session credentials survive JSON import")
+        }
+        for text in ["user_other::" + sessionJWT, "test@example.invalid----user_fixture::broken", "user_fixture::" + (try sessionToken(expiry: 1)),
+                     "user_fixture::" + (try sessionToken(subject: "auth0|user_other")), "user_fixture::" + sessionJWT + "\r\nCookie: injected",
+                     "user_fixture%3A%3A" + sessionJWT + "%0D%0Ainjected"] {
+            rejects("Invalid, expired and mismatched Cursor sessions are rejected") { _ = try CursorSessionCredential(text) }
+        }
+        let checkedSession = try CursorSessionCredential("test@example.invalid----user_fixture::" + sessionJWT)
+        rejects("A different remote account cannot authenticate a pasted session") {
+            _ = try checkedSession.verifiedEmail(["sub": "user_other", "email": "test@example.invalid"])
+        }
+        rejects("A pasted email must match the remote Cursor account") {
+            _ = try checkedSession.verifiedEmail(["sub": "user_fixture", "email": "other@example.invalid"])
+        }
+
         let identity = Account(["name": "codex-work.json", "provider": "codex", "email": "same@example.invalid",
                                 "status": "active", "note": "工作账户", "priority": "12", "auth_index": "index-1",
                                 "id_token": ["chatgpt_account_id": "work-id", "plan_type": "business",

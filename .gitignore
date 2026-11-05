@@ -12,3 +12,7 @@ work/
 
 # Cursor 汉化：下载的语言包原包
 cursor-zh/vendor/
+
+# 验证与压测生成的结果
+outputs/BridgeDock-源码/bd-verify.log
+outputs/BridgeDock-源码/kiro-stress-result.json

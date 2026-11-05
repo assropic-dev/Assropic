@@ -123,48 +123,89 @@ globalThis.__bridgeDockParameterHeaders = function () {
   return { "X-BridgeDock-Model-Parameters": globalThis.__bridgeDockLocal?.modelParametersEnabled ? "1" : "0" };
 };
 
-// Reuse Cursor's native sections, search and selection controls. Public model
-// names remain routing identifiers; grouping never rewrites or drops them.
-let modelSources = new Map();
+// Model families define picker sections. Providers remain independent routing
+// choices and searchable metadata, never the basis for splitting a family.
+const pickerFamilies = [
+  ["gpt", "GPT", /^(?:gpt|chatgpt)(?:[-_.\s]|$)|^o\d+(?:[-_.\s]|$)/],
+  ["claude", "Claude", /^claude(?:[-_.\s]|$)/],
+  ["gemini", "Gemini", /^gemini(?:[-_.\s]|$)/],
+  ["grok", "Grok", /^grok(?:[-_.\s]|$)/],
+  ["kimi", "Kimi", /^(?:kimi|moonshot)(?:[-_.\s]|$)|^k\d+(?:[.]\d+|d\d+)*(?:[-_\s]|$)/],
+  ["glm", "GLM", /^(?:glm|chatglm)(?:[-_.\s]|$)/],
+  ["deepseek", "DeepSeek", /^deepseek(?:[-_.\s]|$)/],
+  ["qwen", "Qwen", /^(?:qwen|qwq|qvq)(?:\d|[-_.\s]|$)/],
+  ["minimax", "MiniMax", /^minimax(?:[-_.\s]|$)/],
+  ["mistral", "Mistral", /^(?:mistral|mixtral|ministral|codestral|devstral|pixtral|magistral)(?:[-_.\s]|$)/],
+  ["llama", "Llama", /^(?:meta-)?llama(?:\d|[-_.\s]|$)/],
+  ["composer", "Composer", /^composer(?:[-_.\s]|$)/],
+  ["muse", "Muse", /^muse(?:[-_.\s]|$)/],
+  ["doubao", "豆包", /^doubao(?:[-_.\s]|$)/],
+  ["ernie", "文心", /^ernie(?:[-_.\s]|$)/]
+];
+function pickerFamily(name) {
+  const model = name.split("/").at(-1).normalize("NFKC").toLowerCase();
+  const index = pickerFamilies.findIndex(([, , pattern]) => pattern.test(model));
+  if (index >= 0) {
+    const [key, title] = pickerFamilies[index];
+    return { key, title, order: index };
+  }
+  // Unrecognized/custom families still group by model name, not by their channel.
+  const stem = model.split(/[-_.\s]/)[0] || model;
+  return { key: "other:" + stem, title: stem || "其他模型", order: pickerFamilies.length };
+}
+let modelGroups = new Map();
 function organizeModels(rows, catalog) {
   const entries = Array.isArray(catalog) ? catalog : catalog?.data ?? [];
   const metadata = new Map(entries.map(entry => [entry.id, entry]));
-  const sources = new Map();
+  const groups = new Map();
   const byModel = new Map();
   for (const row of rows) {
     const prefix = row.name.includes("/") ? row.name.slice(0, row.name.indexOf("/")) : "";
     const entry = metadata.get(row.name) ?? {};
-    const key = prefix || entry.owned_by || "BridgeDock";
-    const name = entry.owned_by || prefix || "BridgeDock";
-    if (!sources.has(key)) sources.set(key, { key, name });
-    byModel.set(row.name, sources.get(key));
+    const family = pickerFamily(row.name);
+    if (!groups.has(family.key)) groups.set(family.key, family);
+    const providers = Array.isArray(entry.bridgedock_parameters?.providers) ? entry.bridgedock_parameters.providers : [];
+    byModel.set(row.name, { ...family, sources: [prefix, entry.owned_by,
+      ...providers.flatMap(provider => [provider.name, provider.id])].filter(Boolean) });
   }
-  const ordered = [...sources.values()].sort((a, b) => a.name.localeCompare(b.name, "zh-CN", { numeric: true }) || a.key.localeCompare(b.key));
-  const sections = new Map(ordered.map((source, index) => [source.key, index + 1]));
-  const nameCounts = new Map();
-  ordered.forEach(source => nameCounts.set(source.name, (nameCounts.get(source.name) ?? 0) + 1));
-  ordered.forEach(source => { source.title = nameCounts.get(source.name) > 1 ? `${source.name} · ${source.key}` : source.name; });
-  modelSources = byModel;
+  const ordered = [...groups.values()].sort((a, b) => a.order - b.order || a.title.localeCompare(b.title, "zh-CN", { numeric: true }));
+  const sections = new Map(ordered.map((group, index) => [group.key, index + 1]));
+  modelGroups = byModel;
   return rows.map(row => ({ ...row, namedModelSectionIndex: sections.get(byModel.get(row.name).key),
+    ...(row.tagline === "Local provider model" ? { tagline: "本地供应商模型" } : {}),
+    ...(row.tooltipData?.markdownContent ? { tooltipData: { ...row.tooltipData,
+      markdownContent: row.tooltipData.markdownContent
+        .replaceAll("Discovered from your local provider.", "来自本地供应商。")
+        .replace(/Context: ([\d,. ]+) tokens\./g, "上下文：$1 词元。")
+        .replace(/Max output: ([\d,. ]+) tokens\./g, "最大输出：$1 词元。")
+        .replaceAll("Reasoning: supported.", "支持思考。")
+        .replaceAll("Vision: supported.", "支持图片输入。")
+    } } : {}),
     clientDisplayName: row.name, inputboxShortModelName: row.name,
     variants: row.variants?.map(variant => ({ ...variant, displayName: row.name, displayNameOutsidePicker: row.name }))
-  })).sort((a, b) => a.namedModelSectionIndex - b.namedModelSectionIndex || a.name.localeCompare(b.name, "zh-CN", { numeric: true }));
+  })).sort((a, b) => a.namedModelSectionIndex - b.namedModelSectionIndex ||
+    a.name.split("/").at(-1).localeCompare(b.name.split("/").at(-1), "zh-CN", { numeric: true }) || a.name.localeCompare(b.name));
 }
 
 globalThis.__bridgeDockModelSection = function (props) {
   if (!globalThis.__bridgeDockLocal || props.title || !props.models?.length) return props;
-  const source = modelSources.get(props.models[0].name);
-  if (!source || !props.models.every(model => modelSources.get(model.name)?.key === source.key)) return props;
-  return { ...props, title: `${source.title} · ${props.models.length}` };
+  const group = modelGroups.get(props.models[0].name);
+  if (!group || !props.models.every(model => modelGroups.get(model.name)?.key === group.key)) return props;
+  return { ...props, title: `${group.title} · ${props.models.length}` };
 };
 
 globalThis.__bridgeDockModelMatches = function (model, query) {
   if (!globalThis.__bridgeDockLocal) return false;
   const normalize = value => String(value ?? "").normalize("NFKC").toLocaleLowerCase();
-  const source = modelSources.get(model.name);
+  const group = modelGroups.get(model.name);
   const text = normalize([model.name, model.name?.replace(/-/g, " "), model.clientDisplayName,
-    source?.name, source?.key, ...(model.variants ?? []).map(variant => variant.displayName)].join(" "));
+    group?.title, ...(group?.sources ?? []), ...(model.variants ?? []).map(variant => variant.displayName)].join(" "));
   return normalize(query).trim().split(/\s+/).every(word => text.includes(word));
+};
+
+// Choose the existing native parameter submenu for this local provider only.
+globalThis.__bridgeDockParameterMenu = function (officialEnabled) {
+  return globalThis.__bridgeDockLocal ? !!globalThis.__bridgeDockLocal.modelParametersEnabled : officialEnabled;
 };
 
 globalThis.__bridgeDockPickerLabels = function (labels) {
@@ -183,7 +224,27 @@ globalThis.__bridgeDockPickerLayout = function (props) {
 // /v1/models (capabilities.context_length / reasoning_effort). Cursor's local runtime
 // reads the same fields for the remaining-context ring; the picker offers only
 // values the model actually supports.
-const effortLabels = { none: "关闭", minimal: "极低", low: "低", medium: "中", high: "高", xhigh: "超高", "extra-high": "超高", max: "最高", ultra: "极深" };
+// 档位名称沿用上游原名（Cursor 的 displayName、Work 的“标准 / 进阶 / 极致”，否则为档位 ID）；
+// 只有本地补出的 none 档显示为“默认”。
+const effortLabel = (value, official) => official || (value === "none" ? "默认" : value);
+const parameterNames = { context: "上下文", reasoning: "思考强度", fast: "快速模式", thinking: "深度思考", provider: "供应商" };
+const publicModelName = name => typeof name === "string"
+  ? name.replace(/^(claude-(?:opus|sonnet|haiku|fable)-[0-9]+)\.([0-9]+)(?=-|$)/, "$1-$2") : name;
+
+function localizedDefinitions(definitions) {
+  return definitions.map(definition => {
+    const type = definition.parameterType;
+    const key = type?.enumParameter ? "enumParameter" : type?.booleanParameter ? "booleanParameter" : undefined;
+    if (!key) return { ...definition, name: parameterNames[definition.id] ?? definition.name };
+    const values = type[key].values.map(choice => ({ ...choice,
+      displayName: definition.id === "reasoning" ? effortLabel(choice.value, choice.displayName)
+        : ["fast", "thinking"].includes(definition.id) && ["false", "true"].includes(choice.value)
+          ? choice.value === "true" ? "开" : "关" : choice.displayName
+    }));
+    return { ...definition, name: parameterNames[definition.id] ?? definition.name,
+      parameterType: { ...type, [key]: { ...type[key], values } } };
+  });
+}
 const tokenLabel = value => {
   if (value % 1048576 === 0) return `${value / 1048576}M`;
   if (value % 1000000 === 0) return `${value / 1000000}M`;
@@ -196,7 +257,8 @@ function modelCapability(metadata) {
   const limit = Number(capabilities.context_length ?? metadata?.context_length);
   const efforts = Array.isArray(capabilities.reasoning_effort) ? capabilities.reasoning_effort
     .filter(value => typeof value === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(value) && value !== "none") : [];
-  return { limit: Number.isSafeInteger(limit) && limit > 0 ? limit : undefined, efforts: [...new Set(efforts)] };
+  const defaultEffort = efforts.includes(capabilities.reasoning_default) ? capabilities.reasoning_default : "none";
+  return { limit: Number.isSafeInteger(limit) && limit > 0 ? limit : undefined, efforts: [...new Set(efforts)], defaultEffort };
 }
 
 // Budgets below the real window let a long conversation be summarized earlier.
@@ -208,33 +270,147 @@ function contextChoices(limit) {
   return [...below.slice(-3), limit];
 }
 
+function parameterLabel(name, parameters, definitions) {
+  const labels = parameters.filter(parameter => parameter.id === "reasoning" ||
+    (parameter.id === "fast" && parameter.value === "true")).map(parameter => {
+    if (parameter.id === "fast") return "快速";
+    const definition = definitions.find(item => item.id === parameter.id);
+    const values = definition?.parameterType?.enumParameter?.values ?? definition?.parameterType?.booleanParameter?.values ?? [];
+    const label = values.find(item => item.value === parameter.value)?.displayName ?? parameter.value;
+    return label === "默认" || label === "Default" ? "" : label;
+  }).filter(Boolean);
+  return [name, ...labels].join(" ");
+}
+
+function selectedParameters(row, requested) {
+  const all = row.variants ?? [];
+  const provider = requested.find(parameter => parameter.id === "provider")?.value;
+  const matching = all.filter(variant => variant.parameterValues.some(parameter => parameter.id === "provider" && parameter.value === provider));
+  const variants = matching.length ? matching : all;
+  const fallback = variants.find(variant => variant.isDefaultNonMaxConfig) ?? variants[0];
+  if (!fallback) return [];
+  const desired = new Map(fallback.parameterValues.map(parameter => [parameter.id, parameter.value]));
+  for (const parameter of requested) {
+    if (variants.some(variant => variant.parameterValues.some(value =>
+      value.id === parameter.id && value.value === parameter.value))) {
+      desired.set(parameter.id, parameter.value);
+    }
+  }
+  return variants.find(variant => variant.parameterValues.every(parameter =>
+    desired.get(parameter.id) === parameter.value))?.parameterValues ?? fallback.parameterValues;
+}
+
+// version 2：同名模型合并为一条，供应商作为参数。每个供应商只组合自己声明的
+// context/effort，切换供应商后原生菜单里的可选项随之变化。
+function nativeParametersV2(name, native) {
+  const valid = value => typeof value === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(value);
+  const declared = id => {
+    const values = native.definitions.find(item => item?.id === id)?.values;
+    return Array.isArray(values) ? values.filter(value => typeof value?.id === "string" && value.id) : [];
+  };
+  const providers = (Array.isArray(native.providers) ? native.providers : [])
+    .filter(provider => typeof provider?.id === "string" && provider.id);
+  const providerValues = declared("provider").filter(value => providers.some(provider => provider.id === value.id));
+  if (!providerValues.length) return undefined;
+  const contextValues = declared("context").filter(value => Number.isSafeInteger(Number(value.id)) && Number(value.id) > 0);
+  const reasoningValues = declared("reasoning").filter(value => valid(value.id));
+  const fast = declared("fast").some(value => value.id === "true");
+
+  const definitions = [
+    ...(fast ? [{ id: "fast", name: "快速模式", parameterType: { booleanParameter: {
+      values: [{ value: "false", displayName: "关" }, { value: "true", displayName: "开" }] } } }] : []),
+    ...(contextValues.length ? [{ id: "context", name: "上下文",
+      markdownTooltip: "选较小的值会更早压缩对话。",
+      parameterType: { enumParameter: { values: contextValues.map(value =>
+        ({ value: value.id, displayName: tokenLabel(Number(value.id)) })) } } }] : []),
+    ...(reasoningValues.length ? [{ id: "reasoning", name: "思考强度", isCycleableByHotkey: true,
+      parameterType: { enumParameter: { values: reasoningValues.map(value =>
+        ({ value: value.id, displayName: effortLabel(value.id, value.label !== value.id ? value.label : undefined) })) } } }] : []),
+    { id: "provider", name: native.definitions.find(item => item.id === "provider")?.name || "供应商",
+      parameterType: { enumParameter: { values: providerValues.map(value =>
+        ({ value: value.id, displayName: value.label || value.id })) } } }
+  ];
+
+  const variants = [];
+  providerValues.forEach((value, index) => {
+    const provider = providers.find(item => item.id === value.id);
+    const limit = Number(provider.context_length);
+    const declaredContexts = Array.isArray(provider.context_options) ? provider.context_options.map(String) : undefined;
+    const contexts = Number.isSafeInteger(limit) && limit > 0
+      ? contextValues.map(item => item.id).filter(id => Number(id) <= limit && (!declaredContexts || declaredContexts.includes(id))) : [];
+    const supported = Array.isArray(provider.reasoning_effort) ? provider.reasoning_effort : [];
+    const efforts = reasoningValues.map(item => item.id).filter(id => supported.includes(id));
+    const defaultEffort = efforts.includes(provider.reasoning_default) ? provider.reasoning_default : efforts[0];
+    const defaultContext = contexts.includes(String(provider.context_default)) ? String(provider.context_default) : contexts.at(-1);
+    const speeds = fast && provider.fast === true ? ["false", "true"] : [undefined];
+    const defaultSpeed = provider.fast_default === true ? "true" : speeds[0];
+    const combos = (contexts.length ? contexts : [undefined]).flatMap(context =>
+      (efforts.length ? efforts : [undefined]).flatMap(effort =>
+        speeds.map(speed => ({ context, effort, speed }))));
+    const generated = combos.map(({ context, effort, speed }) => ({
+      parameterValues: [...(speed !== undefined ? [{ id: "fast", value: speed }] : []),
+        ...(context !== undefined ? [{ id: "context", value: context }] : []),
+        ...(effort !== undefined ? [{ id: "reasoning", value: effort }] : [])],
+      isDefaultNonMaxConfig: context === defaultContext && effort === defaultEffort && speed === defaultSpeed
+    }));
+    // Cursor publishes exact combinations, which may not form a Cartesian product.
+    const declaredVariants = Array.isArray(provider.variants) && provider.variants.length ? provider.variants : generated;
+    const choices = declaredVariants.filter(variant => Array.isArray(variant.parameterValues))
+      .slice().sort((a, b) => Number(!!b.isDefaultNonMaxConfig) - Number(!!a.isDefaultNonMaxConfig));
+    choices.forEach((variant, choiceIndex) => {
+      const parameterValues = [...variant.parameterValues.filter(item => item.id !== "provider"), { id: "provider", value: value.id }];
+      const isDefault = index === 0 && choiceIndex === 0;
+      variants.push({ parameterValues, displayName: name,
+        displayNameOutsidePicker: parameterLabel(name, [...parameterValues.filter(item => item.id !== "fast"),
+          ...parameterValues.filter(item => item.id === "fast")], definitions),
+        isMaxMode: false, isDefaultNonMaxConfig: isDefault, isDefaultMaxConfig: isDefault });
+    });
+  });
+  return { definitions, variants };
+}
+
 globalThis.__bridgeDockEnrichModels = function (rows, catalog) {
   rows = organizeModels(rows, catalog);
   const entries = Array.isArray(catalog) ? catalog : catalog?.data ?? [];
   const parametersEnabled = !!globalThis.__bridgeDockLocal?.modelParametersEnabled;
   return rows.map(row => {
-    const { limit, efforts } = modelCapability(entries.find(entry => entry.id === row.name));
+    const metadata = entries.find(entry => entry.id === row.name);
+    const { limit, efforts, defaultEffort } = modelCapability(metadata);
     const base = { ...row, ...(limit ? { contextTokenLimit: limit } : {}), supportsThinking: efforts.length > 0,
       supportsNonMaxMode: true, supportsMaxMode: false };
-    if (!parametersEnabled) return base;
+    if (!parametersEnabled) return { ...base, parameterDefinitions: [], variants: [] };
+    const native = metadata?.bridgedock_parameters;
+    if (native?.version === 1 && native.definitions?.length && native.variants?.length) {
+      const definitions = localizedDefinitions(native.definitions);
+      return { ...base, parameterDefinitions: definitions,
+        variants: native.variants.map(variant => ({ ...variant,
+          displayName: row.name, displayNameOutsidePicker: parameterLabel(row.name, variant.parameterValues, definitions),
+          isMaxMode: false })) };
+    }
+    if (native?.version === 2 && Array.isArray(native.definitions)) {
+      const parsed = nativeParametersV2(row.name, native);
+      return parsed ? { ...base, parameterDefinitions: parsed.definitions, variants: parsed.variants }
+        : { ...base, parameterDefinitions: [], variants: [] };
+    }
     const contexts = contextChoices(limit);
     const reasoning = efforts.length ? ["none", ...efforts] : [];
     const parameterDefinitions = [
-      ...(contexts.length > 1 ? [{ id: "context", name: "上下文",
+      ...(contexts.length > 1 ? [{ id: "context", name: "上下文预算",
         markdownTooltip: `模型上下文上限 ${tokenLabel(limit)}。选较小的值会更早压缩对话。`,
         parameterType: { enumParameter: { values: contexts.map(value => ({ value: String(value), displayName: tokenLabel(value) })) } } }] : []),
       ...(reasoning.length ? [{ id: "reasoning", name: "思考强度", isCycleableByHotkey: true,
-        markdownTooltip: "选项来自模型资料。“关闭”不发送思考参数，使用渠道默认。",
-        parameterType: { enumParameter: { values: reasoning.map(value => ({ value, displayName: effortLabels[value] ?? value })) } } }] : [])
+        markdownTooltip: "选择本次请求的思考强度。“默认”使用所选模型原有的档位。",
+        parameterType: { enumParameter: { values: reasoning.map(value => ({ value, displayName: effortLabel(value) })) } } }] : [])
     ];
     if (!parameterDefinitions.length) return { ...base, parameterDefinitions: [], variants: [] };
     const contextValues = contexts.length > 1 ? contexts.map(String) : [undefined];
     const reasoningValues = reasoning.length ? reasoning : [undefined];
     const variants = contextValues.flatMap(context => reasoningValues.map(effort => {
-      const isDefault = (context === undefined || context === String(limit)) && (effort === undefined || effort === "none");
+      const isDefault = (context === undefined || context === String(limit)) && (effort === undefined || effort === defaultEffort);
       return { parameterValues: [...(context !== undefined ? [{ id: "context", value: context }] : []),
         ...(effort !== undefined ? [{ id: "reasoning", value: effort }] : [])],
-        displayName: row.name, displayNameOutsidePicker: row.name,
+        displayName: row.name, displayNameOutsidePicker: parameterLabel(row.name,
+          effort === undefined ? [] : [{ id: "reasoning", value: effort }], parameterDefinitions),
         isMaxMode: false, isDefaultNonMaxConfig: isDefault, isDefaultMaxConfig: isDefault };
     }));
     return { ...base, parameterDefinitions, variants };
@@ -308,13 +484,14 @@ async function refreshModels(service, toPlain, onlyIfChanged) {
     const stored = service._modelConfigService.getStoredModelConfig("composer");
     const selected = hadOfficialSnapshot ? stored : saved?.composer;
     const sessionDefault = globalThis.__bridgeDockLocal.model;
-    const name = [selected?.modelName, sessionDefault].find(candidate => rows.some(row => row.name === candidate)) ?? rows[0].name;
+    const previousName = [selected?.modelName, sessionDefault].find(candidate => rows.some(row => row.name === publicModelName(candidate)));
+    const name = publicModelName(previousName) ?? rows[0].name;
     const row = rows.find(row => row.name === name);
     const restoredParameters = saved?.preferences?.[name]?.parameters
-      ?? saved?.composer?.selectedModels?.find(value => value.modelId === name)?.parameters ?? [];
-    const requested = enabled ? ((wasParametersActive ? selected?.selectedModels?.find(value => value.modelId === name)?.parameters : undefined) ?? restoredParameters) : [];
-    const parameters = row.variants?.find(variant => requested.length && variant.parameterValues.every(value => requested.some(item => item.id === value.id && item.value === value.value)))?.parameterValues
-      ?? (enabled ? row.variants?.find(variant => variant.isDefaultNonMaxConfig)?.parameterValues : undefined) ?? [];
+      ?? saved?.preferences?.[previousName]?.parameters
+      ?? saved?.composer?.selectedModels?.find(value => publicModelName(value.modelId) === name)?.parameters ?? [];
+    const requested = enabled ? ((wasParametersActive ? selected?.selectedModels?.find(value => publicModelName(value.modelId) === name)?.parameters : undefined) ?? restoredParameters) : [];
+    const parameters = enabled ? selectedParameters(row, requested) : [];
     service._modelConfigService.setModelConfig("composer", { modelName: name,
       selectedModels: [{ modelId: name, parameters: copy(parameters) }], maxMode: false });
     // Some Cursor migrations rewrite preferences while selecting a model.

@@ -4,6 +4,211 @@ import Network
 /// Public loopback endpoint. The core's private key never leaves this process.
 /// Model filtering is applied to both discovery and inference before any upstream request.
 final class ModelGateway: @unchecked Sendable {
+    /// Native picker selections travel in a local-only header. Validate them
+    /// against this route before translating to an upstream ID or API field.
+    static func parameterSelection(_ header: String?) throws -> [String: String]? {
+        guard let header else { return nil }
+        guard header.utf8.count <= 16_384, let text = header.removingPercentEncoding,
+              let rows = try? JSONDecoder().decode([CursorModelCatalog.Parameter].self, from: Data(text.utf8)),
+              rows.count <= 32 else { throw BridgeError.message("模型参数格式无效，请重新选择模型。") }
+        var result: [String: String] = [:]
+        for row in rows {
+            guard result[row.id] == nil else { throw BridgeError.message("模型参数重复，请重新选择模型。") }
+            result[row.id] = row.value
+        }
+        return result
+    }
+
+    /// Older clients sometimes persisted a provider-qualified public name such
+    /// as `Work/kimi-k3.1-pro` even though the v2 catalogue exposes the same
+    /// model under its canonical bare ID. Resolve that form only when the
+    /// qualifier matches a real published provider name; an arbitrary
+    /// `prefix/model` never bypasses the publication allowlist.
+    static func qualifiedProviders(for publicID: String, in catalog: [PublishedModel]) -> (bareID: String, providers: [ModelPublishing.Provider])? {
+        guard let slash = publicID.firstIndex(of: "/"), slash > publicID.startIndex else { return nil }
+        let qualifier = String(publicID[..<slash])
+        let bareID = String(publicID[publicID.index(after: slash)...])
+        guard !bareID.isEmpty else { return nil }
+        let candidates = ModelPublishing.providers(in: catalog, publicID: bareID)
+        guard !candidates.isEmpty else { return nil }
+        func compact(_ value: String) -> String {
+            value.lowercased().filter { $0.isLetter || $0.isNumber }
+        }
+        let wanted = compact(qualifier)
+        let matches = candidates.filter { provider in
+            let name = compact(provider.name)
+            // `route:` and `provider:` entries are inferred from raw core
+            // model IDs. Treating those prefixes as aliases would let a raw
+            // core route such as `fixture/model-a` bypass the public catalog.
+            let isPublishedSource = !provider.key.hasPrefix("route:") && !provider.key.hasPrefix("provider:")
+            return isPublishedSource && wanted == name
+        }
+        return matches.isEmpty ? nil : (bareID, matches)
+    }
+
+    /// 按 parameters 里 id 为 provider 的值选渠道，缺省取第一个；provider 键会被消费掉。
+    /// 所选渠道未声明的思考强度、上下文和 Fast 会去掉，改用该渠道的默认值。
+    static func provider(for publicID: String, in catalog: [PublishedModel],
+                         parameters: inout [String: String]?) throws -> PublishedModel? {
+        var providers = ModelPublishing.providers(in: catalog, publicID: publicID)
+        if providers.isEmpty, let qualified = qualifiedProviders(for: publicID, in: catalog) {
+            providers = qualified.providers
+            var values = parameters ?? [:]
+            if values["provider"] == nil, providers.count == 1 { values["provider"] = providers[0].key }
+            parameters = values
+        }
+        if providers.isEmpty, let legacy = legacyCursorRoute(for: publicID, in: catalog) {
+            // 客户端刷新模型列表前仍会发送旧的带后缀 ID：钉住原供应商与思考强度。
+            providers = ModelPublishing.providers(in: catalog, publicID: legacy.model.publicID)
+            var values = parameters ?? [:]
+            if values["provider"] == nil { values["provider"] = legacy.model.sourceID }
+            if values["reasoning"] == nil, let effort = legacy.effort { values["reasoning"] = effort }
+            parameters = values
+        }
+        if providers.isEmpty, let base = ModelPublishing.fastBase(of: publicID) {
+            // 合并前发布的高速模型 ID 仍可调用：改为基础模型并打开快速模式，钉住原渠道。
+            let tail = String(base.split(separator: "/", maxSplits: 1).last ?? Substring(base))
+            let candidates = ModelPublishing.providers(in: catalog, publicID: base)
+                + (tail == base ? [] : ModelPublishing.providers(in: catalog, publicID: tail))
+            if let owner = candidates.first(where: { $0.model.fastModelID.map { $0.hasSuffix("/" + publicID) || $0 == publicID } == true }) {
+                providers = candidates
+                var values = parameters ?? [:]
+                if values["provider"] == nil { values["provider"] = owner.key }
+                values["fast"] = "true"
+                parameters = values
+            }
+        }
+        guard !providers.isEmpty else { return nil }
+        let requested = parameters?.removeValue(forKey: "provider")
+        // Existing clients may still call Kiro's dotted Claude ID. Preserve that
+        // route unless they explicitly choose another provider of the merged model.
+        let legacy = publicID == ModelPublishing.publicModelID(publicID) ? nil : providers.first { $0.model.modelName == publicID }
+        guard let chosen = requested.map({ key in providers.first { $0.key == key } }) ?? legacy ?? providers.first else {
+            throw BridgeError.message("所选供应商已不可用，请刷新模型列表后重新选择。")
+        }
+        if var values = parameters {
+            if let effort = values["reasoning"], effort != "none", chosen.capability?.reasoningEfforts?.contains(effort) != true {
+                values.removeValue(forKey: "reasoning")
+            }
+            if let context = values["context"] {
+                let options = chosen.contextOptions
+                let size = Int(context)
+                if size.map(options.contains) != true { values.removeValue(forKey: "context") }
+            }
+            if values["fast"] != nil, !chosen.supportsFast { values.removeValue(forKey: "fast") }
+            parameters = values
+        }
+        return chosen.model
+    }
+
+    /// 旧公开 ID（`Curs-f3e5cf18/kimi-k3-high` 或 `kimi-k3-high`）对应的合并路由和其中的思考强度。
+    static func legacyCursorRoute(for publicID: String, in catalog: [PublishedModel]) -> (model: PublishedModel, effort: String?)? {
+        let slug = ModelPublishing.migratedPublicID(publicID)
+        for model in catalog where model.isEnabled {
+            guard let route = model.cursorRoute,
+                  let member = route.memberModelIDs.first(where: { $0 == slug || $0.hasSuffix("/" + slug) }) else { continue }
+            return (model, route.modelsByEffort.first { $0.value == member }?.key)
+        }
+        return nil
+    }
+
+    static func routedBody(_ source: [String: Any], route: PublishedModel, path: String,
+                           parameters: [String: String]?) throws -> [String: Any] {
+        var body = source
+        guard let parameters, !parameters.isEmpty else {
+            body["model"] = try route.cursorRoute?.modelID(body: body, path: path) ?? route.id
+            return body
+        }
+        if let work = route.workModel {
+            _ = try work.headers(parameters: parameters)
+            body["model"] = route.id
+        } else if let cursor = route.cursorRoute, !cursor.variants.isEmpty {
+            body["model"] = try cursor.modelID(parameters: parameters)
+        } else {
+            let capability = ModelCapability(definition: route.metadata) ?? route.capability
+            guard Set(parameters.keys).isSubset(of: ["context", "reasoning", "fast"]) else {
+                throw BridgeError.message("当前渠道不支持所选模型参数，请刷新模型列表。")
+            }
+            if let fast = parameters["fast"] {
+                guard ["true", "false"].contains(fast), fast == "false" || route.fastModelID != nil else {
+                    throw BridgeError.message("当前渠道没有该模型的高速版，请刷新模型列表。")
+                }
+            }
+            if let value = parameters["context"] {
+                guard let limit = capability?.contextLength, let size = Int(value), size > 0, size <= limit else {
+                    throw BridgeError.message("所选上下文预算超过当前渠道的模型上限。")
+                }
+            }
+            let effort = parameters["reasoning"]
+            if let effort, effort != "none", capability?.reasoningEfforts?.contains(effort) != true {
+                throw BridgeError.message("当前渠道不支持思考档位 \(effort)，请刷新模型列表。")
+            }
+            if let cursor = route.cursorRoute { body["model"] = try cursor.modelID(effort: effort == "none" ? nil : effort) }
+            else { body["model"] = parameters["fast"] == "true" ? route.fastModelID! : route.id }
+        }
+        if let effort = parameters["reasoning"] {
+            // Cursor's "none" variant is encoded in its exact upstream model ID.
+            // Other providers use "none" in this menu to retain their default.
+            body.removeValue(forKey: "reasoning_effort")
+            var reasoning = body["reasoning"] as? [String: Any] ?? [:]
+            var output = body["output_config"] as? [String: Any] ?? [:]
+            reasoning.removeValue(forKey: "effort")
+            output.removeValue(forKey: "effort")
+            if effort != "none" {
+                if path.hasPrefix("/v1/responses") { reasoning["effort"] = effort }
+                else if path.hasPrefix("/v1/messages") {
+                    output["effort"] = effort
+                    body["thinking"] = ["type": "adaptive"]
+                } else { body["reasoning_effort"] = effort }
+            }
+            body["reasoning"] = reasoning.isEmpty ? nil : reasoning
+            body["output_config"] = output.isEmpty ? nil : output
+        }
+        return body
+    }
+
+    /// Clients sometimes persist an aborted turn as an empty assistant message;
+    /// Kimi and others reject the whole request for it, and it carries nothing.
+    static func droppingEmptyAssistantMessages(_ source: [String: Any]) -> [String: Any] {
+        func blank(_ value: Any?) -> Bool {
+            switch value {
+            case nil, is NSNull: return true
+            case let text as String: return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            case let parts as [Any]:
+                return parts.allSatisfy { part in
+                    guard let part = part as? [String: Any] else { return blank(part) }
+                    guard let type = part["type"] as? String, ["text", "output_text", "input_text"].contains(type) else { return false }
+                    return blank(part["text"])
+                }
+            default: return false
+            }
+        }
+        func empty(_ item: Any) -> Bool {
+            guard let message = item as? [String: Any], message["role"] as? String == "assistant",
+                  (message["type"] as? String ?? "message") == "message" else { return false }
+            for key in ["tool_calls", "function_call", "reasoning_content", "audio", "refusal"] where !blank(message[key]) {
+                if let calls = message[key] as? [Any], calls.isEmpty { continue }
+                return false
+            }
+            return blank(message["content"])
+        }
+        var body = source
+        for key in ["messages", "input"] {
+            if let items = body[key] as? [Any] { body[key] = items.filter { !empty($0) } }
+        }
+        return body
+    }
+
+    static func routedHeaders(_ source: [String: String], route: PublishedModel,
+                              parameters: [String: String]?) throws -> [String: String] {
+        var result = source.filter { !["x-kimi-model-speed", "x-kimi-context-length"].contains($0.key.lowercased()) }
+        if let work = route.workModel {
+            let incoming = Dictionary(source.map { ($0.key.lowercased(), $0.value) }, uniquingKeysWith: { _, last in last })
+            result.merge(try work.headers(parameters: parameters ?? [:], incoming: incoming)) { _, fresh in fresh }
+        }
+        return result
+    }
+
     private let queue = DispatchQueue(label: "local.bridgedock.model-gateway")
     private let lock = NSLock()
     private var listener: NWListener?
@@ -14,9 +219,35 @@ final class ModelGateway: @unchecked Sendable {
     /// whatever model the client asked for.
     func update(port: Int, corePort: Int, clientKey: String, coreKey: String, catalog: [PublishedModel], coreModels: [String] = []) {
         lock.lock()
+        let kiro = configuration.kiro
         configuration = GatewayConfiguration(port: port, corePort: corePort, clientKey: clientKey, coreKey: coreKey,
-                                             catalog: catalog.filter(\.isEnabled), imageModel: Self.preferredImageModel(coreModels))
+                                             catalog: catalog.filter(\.isEnabled), imageModel: Self.preferredImageModel(coreModels), kiro: kiro)
         lock.unlock()
+    }
+
+    /// Connection-level failures where kiro2cc produced no response, so retrying on the core is safe.
+    static func isUnreachable(_ failure: Error) -> Bool {
+        guard let code = (failure as? URLError)?.code else { return false }
+        return [.cannotConnectToHost, .networkConnectionLost, .cannotFindHost, .notConnectedToInternet].contains(code)
+    }
+
+    /// Kiro inference bypasses the core when the streaming runtime is up; nil sends it back to the core.
+    func updateKiro(_ route: KiroGatewayRoute?) {
+        lock.withLock { configuration.kiro = route }
+    }
+
+    /// Kiro models are owned by "kiro" in the core catalog; their prefix selects the account pool,
+    /// or the shared pool when two or more Kiro accounts are enabled.
+    static func kiroTarget(for model: PublishedModel, route: KiroGatewayRoute?) -> (port: Int, key: String, model: String)? {
+        guard let route, model.owner.lowercased() == "kiro" else { return nil }
+        let parts = model.id.split(separator: "/", maxSplits: 1).map(String.init)
+        let prefix = parts.count == 2 ? parts[0] : ""
+        // A known prefix joins the shared pool when one exists, so the model picked in the
+        // client no longer pins every request to one account.
+        guard let own = route.keys[prefix] else { return nil }
+        let pool = route.pooledPrefixes.contains(prefix) ? route.keys[KiroGatewayRoute.poolKey] : nil
+        let key = pool ?? own
+        return (route.port, key, parts.count == 2 ? parts[1] : model.id)
     }
 
     /// Newest `gpt-image-X.Y` wins; the plain model is preferred over suffixed variants of the same version.
@@ -84,19 +315,19 @@ final class ModelGateway: @unchecked Sendable {
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
         parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: UInt16(port))!)
-        let value = try NWListener(using: parameters)
-        listener = value
-        value.newConnectionHandler = { [weak self] connection in
-            guard let self else { connection.cancel(); return }
-            let id = UUID()
-            let client = GatewayClient(connection: connection, configuration: { [weak self] in
-                guard let self else { return GatewayConfiguration() }
-                return self.lock.withLock { self.configuration }
-            }, queue: self.queue) { [weak self] in self?.clients.removeValue(forKey: id) }
-            self.clients[id] = client
-            client.start()
-        }
         do {
+            let value = try NWListener(using: parameters)
+            listener = value
+            value.newConnectionHandler = { [weak self] connection in
+                guard let self else { connection.cancel(); return }
+                let id = UUID()
+                let client = GatewayClient(connection: connection, configuration: { [weak self] in
+                    guard let self else { return GatewayConfiguration() }
+                    return self.lock.withLock { self.configuration }
+                }, queue: self.queue) { [weak self] in self?.clients.removeValue(forKey: id) }
+                self.clients[id] = client
+                client.start()
+            }
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 value.stateUpdateHandler = { state in
                     switch state {
@@ -108,7 +339,13 @@ final class ModelGateway: @unchecked Sendable {
                 }
                 value.start(queue: queue)
             }
-        } catch { stop(); throw error }
+        } catch {
+            stop()
+            if let failure = error as? NWError, case .posix(.EADDRINUSE) = failure {
+                throw BridgeError.message("本地端口 \(port) 已被占用。请关闭重复打开的 BridgeDock；如果该端口用于其他程序，可在“设置与诊断”中更换端口。")
+            }
+            throw error
+        }
     }
 
     func stop() {
@@ -121,6 +358,16 @@ final class ModelGateway: @unchecked Sendable {
     }
 }
 
+struct KiroGatewayRoute {
+    let port: Int
+    let keys: [String: String]
+    /// Prefixes routed to the shared pool key.
+    var pooledPrefixes: Set<String> = []
+    /// `keys` entry of the key bound to every pooled account. Prefixes come from
+    /// `LocalSubscriptionIdentity` and never contain "*", so it cannot collide with one.
+    static let poolKey = "*"
+}
+
 private struct GatewayConfiguration {
     var port = 18417
     var corePort = 18419
@@ -128,6 +375,7 @@ private struct GatewayConfiguration {
     var coreKey = ""
     var catalog: [PublishedModel] = []
     var imageModel: String?
+    var kiro: KiroGatewayRoute?
 }
 
 private final class GatewayClient: NSObject, URLSessionDataDelegate, @unchecked Sendable {
@@ -140,6 +388,9 @@ private final class GatewayClient: NSObject, URLSessionDataDelegate, @unchecked 
     private var handled = false
     private var closed = false
     private var responseStarted = false
+    /// The core-bound form of a request sent to kiro2cc, replayed once if kiro2cc cannot be reached
+    /// (for example in the seconds between a crash and its automatic restart).
+    private var kiroFallback: (path: String, headers: [String: String], body: Data)?
     private var continueSent = false
     private var session: URLSession?
     private var task: URLSessionDataTask?
@@ -148,7 +399,7 @@ private final class GatewayClient: NSObject, URLSessionDataDelegate, @unchecked 
     private let maximumBody = 32 * 1024 * 1024
     private static let inferencePaths: Set<String> = ["/v1/chat/completions", "/v1/completions", "/v1/responses", "/v1/responses/compact", "/v1/messages", "/v1/messages/count_tokens", "/v1/embeddings"]
     private static let imagePaths: Set<String> = ["/v1/images/generations", "/v1/images/edits"]
-    private static let hopHeaders: Set<String> = ["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "host", "content-length", "authorization", "x-api-key", "accept-encoding", "expect"]
+    private static let hopHeaders: Set<String> = ["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "host", "content-length", "authorization", "x-api-key", "accept-encoding", "expect", "x-bridgedock-parameters", "x-bridgedock-model-parameters"]
 
     init(connection: NWConnection, configuration: @escaping () -> GatewayConfiguration, queue: DispatchQueue, completed: @escaping () -> Void) {
         self.connection = connection; self.configurationProvider = configuration; self.queue = queue; self.completed = completed
@@ -234,22 +485,47 @@ private final class GatewayClient: NSObject, URLSessionDataDelegate, @unchecked 
         handled = true
         buffer.removeAll(keepingCapacity: false)
         if method == "GET", path == "/v1/models" {
-            respond(200, object: ["object": "list", "data": configuration.catalog.map(modelJSON)])
+            respond(200, object: ["object": "list", "data": ModelPublishing.catalogEntries(configuration.catalog)])
             return
         }
         if method == "GET", path.hasPrefix("/v1/models/") {
             // URLComponents.path has already decoded percent escapes once.
             let id = String(path.dropFirst("/v1/models/".count))
-            guard let model = configuration.catalog.first(where: { $0.publicID == id }) else { error(404, "模型未开放。"); return }
-            respond(200, object: modelJSON(model)); return
+            let providers = ModelPublishing.providers(in: configuration.catalog, publicID: id)
+                .isEmpty ? ModelGateway.qualifiedProviders(for: id, in: configuration.catalog)?.providers ?? []
+                : ModelPublishing.providers(in: configuration.catalog, publicID: id)
+            guard let entry = ModelPublishing.catalogEntry(providers) else { error(404, "模型未开放。"); return }
+            respond(200, object: entry); return
         }
         if Self.imagePaths.contains(path) { forwardImage(method: method, target: target, headers: headers, body: body); return }
         guard method == "POST", Self.inferencePaths.contains(path) else { error(405, "该接口不支持此方法。"); return }
         guard var object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any], let model = object["model"] as? String else { error(400, "请提供 JSON model 字段。"); return }
-        guard let route = configuration.catalog.first(where: { $0.publicID == model }) else { error(404, "该模型未开放或名称已更新，请刷新模型列表。"); return }
-        object["model"] = route.id
+        let route: PublishedModel
+        let forwardedHeaders: [String: String]
+        do {
+            var parameters = try ModelGateway.parameterSelection(headers["x-bridgedock-parameters"])
+            guard let chosen = try ModelGateway.provider(for: model, in: configuration.catalog, parameters: &parameters) else {
+                error(404, "该模型未开放或名称已更新，请刷新模型列表。"); return
+            }
+            route = chosen
+            object = try ModelGateway.routedBody(object, route: route, path: path,
+                                                parameters: parameters)
+            object = ModelGateway.droppingEmptyAssistantMessages(object)
+            forwardedHeaders = try ModelGateway.routedHeaders(headers, route: route, parameters: parameters)
+        } catch { self.error(400, error.localizedDescription); return }
+        let kiro = ModelGateway.kiroTarget(for: route, route: configuration.kiro)
+        // kiro2cc serves chat, messages and responses only; other paths stay on the core.
+        let kiroPaths: Set<String> = ["/v1/chat/completions", "/v1/messages", "/v1/messages/count_tokens", "/v1/responses"]
+        if let kiro, kiroPaths.contains(path) {
+            let coreBody = try? JSONSerialization.data(withJSONObject: object)
+            object["model"] = kiro.model
+            guard let data = try? JSONSerialization.data(withJSONObject: object) else { error(400, "无效的 JSON 请求体。"); return }
+            if let coreBody { kiroFallback = (target, forwardedHeaders, coreBody) }
+            forward(path: target, headers: headers, body: data, port: kiro.port, key: kiro.key)
+            return
+        }
         guard let data = try? JSONSerialization.data(withJSONObject: object) else { error(400, "无效的 JSON 请求体。"); return }
-        forward(path: target, headers: headers, body: data)
+        forward(path: target, headers: forwardedHeaders, body: data)
     }
 
     private func decodedChunks(_ data: Data) throws -> Data? {
@@ -273,19 +549,10 @@ private final class GatewayClient: NSObject, URLSessionDataDelegate, @unchecked 
         }
     }
 
-    private func modelJSON(_ model: PublishedModel) -> [String: Any] {
-        var value = model.metadata
-        value["id"] = model.publicID
-        value["object"] = "model"
-        value["created"] = value["created"] ?? 0
-        value["owned_by"] = model.sourceName
-        return value
-    }
-
     private func forwardImage(method: String, target: String, headers: [String: String], body: Data) {
         guard method == "POST" else { error(405, "该接口不支持此方法。"); return }
         guard let model = configuration.imageModel else {
-            error(503, "未找到可用的 GPT 生图模型，请先在订阅账号中连接 GPT / Codex 登录。"); return
+            error(503, "未找到可用的 GPT 生图模型，请先在“账号与渠道”中连接 GPT / Codex 登录。"); return
         }
         let contentType = headers["content-type"] ?? "application/json"
         if contentType.lowercased().hasPrefix("multipart/form-data") {
@@ -307,11 +574,12 @@ private final class GatewayClient: NSObject, URLSessionDataDelegate, @unchecked 
         forward(path: target, headers: headers, body: data)
     }
 
-    private func forward(path: String, headers: [String: String], body: Data, contentType: String = "application/json") {
-        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(configuration.corePort)" + path)!)
+    private func forward(path: String, headers: [String: String], body: Data, contentType: String = "application/json",
+                         port: Int? = nil, key: String? = nil) {
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port ?? configuration.corePort)" + path)!)
         request.httpMethod = "POST"; request.httpBody = body; request.timeoutInterval = 600
         for (key, value) in headers where !Self.hopHeaders.contains(key) { request.setValue(value, forHTTPHeaderField: key) }
-        request.setValue("Bearer " + configuration.coreKey, forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer " + (key ?? configuration.coreKey), forHTTPHeaderField: "Authorization")
         request.setValue(contentType, forHTTPHeaderField: "Content-Type")
         request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
         let config = URLSessionConfiguration.ephemeral
@@ -359,7 +627,14 @@ private final class GatewayClient: NSObject, URLSessionDataDelegate, @unchecked 
         queue.async { [self] in
             guard !self.closed else { return }
             self.task = nil
-            if failure != nil {
+            if let failure {
+                if !self.responseStarted, let fallback = self.kiroFallback, ModelGateway.isUnreachable(failure) {
+                    // Nothing reached the client yet, so the core's Kiro plugin can serve it instead.
+                    self.kiroFallback = nil
+                    self.session?.finishTasksAndInvalidate(); self.session = nil
+                    self.forward(path: fallback.path, headers: fallback.headers, body: fallback.body)
+                    return
+                }
                 if !self.responseStarted { self.error(502, "反代内核连接失败，请检查 BridgeDock 服务。"); return }
                 // An interrupted SSE must not be reported as a successful, complete response.
                 self.finish(); return

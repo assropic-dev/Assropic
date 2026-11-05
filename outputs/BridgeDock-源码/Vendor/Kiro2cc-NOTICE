@@ -1,0 +1,9 @@
+kiro2cc-proxy
+https://github.com/TsinHzl/kiro2cc-proxy
+Commit e5387453c10a87e350fbe2d7c6505a1b128f5445, built by Vendor/build-kiro2cc.sh.
+Copyright (c) 2026 Harllan He. MIT License, see Kiro2cc-LICENSE.
+
+The binary embeds the ip2region IPv4 database (lionsoul2014/ip2region),
+licensed under the Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
+Other compiled Rust dependencies are under MIT and/or Apache-2.0 licenses as
+listed in the upstream Cargo.lock.

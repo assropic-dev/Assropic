@@ -83,7 +83,7 @@ struct ConnectionProfile {
             capabilities = ["tool_use"]
             """
         case .kiro:
-            return "Kiro 的官方客户端当前使用其内置模型目录。\n\n您可以在“订阅账号”中接入 Kiro 账号，再通过本地接口供 Claude Code、Codex CLI 等工具调用。\n\n若要在 Kiro 编辑器中使用其他渠道，请使用支持自定义 Base URL 的扩展，并填入“其他工具”页提供的连接信息。"
+            return "Kiro 的官方客户端当前使用其内置模型目录。\n\n您可以在“账号与渠道”中接入 Kiro 账号，再通过本地接口供 Claude Code、Codex CLI 等工具调用。\n\n若要在 Kiro 编辑器中使用其他渠道，请使用支持自定义 Base URL 的扩展，并填入“其他工具”页提供的连接信息。"
         case .zcode, .generic:
             return """
             服务商类型    OpenAI 兼容

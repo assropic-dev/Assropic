@@ -121,7 +121,8 @@ enum LocalSubscriptionCredentials {
         let inferred: String?
         if root["claudeAiOauth"] is [String: Any] { inferred = "claude" }
         else if root["tokens"] is [String: Any] { inferred = "codex" }
-        else if root["accessToken"] is String, root["refreshToken"] is String { inferred = "kiro" }
+        else if root["accessToken"] is String, root["refreshToken"] is String,
+                declared == "kiro" || (declared == nil && requested == nil) { inferred = "kiro" }
         else { inferred = declared }
         if let requested, let inferred, requested != inferred {
             throw LocalSubscriptionError.message("凭据所属服务与所选订阅服务不一致。")
@@ -166,6 +167,7 @@ enum LocalSubscriptionCredentials {
                 }
             }
         }
+        if document["type"] == nil, let provider { document["type"] = provider }
         do {
             return try CredentialImport.normalized(JSONSerialization.data(withJSONObject: document, options: [.sortedKeys]))
         } catch {
@@ -224,9 +226,320 @@ enum LocalSubscriptionCredentials {
                 }
             }
             return .init(provider: provider, source: url.path, data: data)
+        case "kimi", "kimi-ai":
+            return try loadKimiCode(provider: provider, home: home, environment: environment)
+        case "xai", "cursor-agent-v1", "zcode":
+            return try loadGeneric(provider: provider, home: home, environment: environment)
         default:
             throw LocalSubscriptionError.message("此服务暂不支持读取本机订阅登录。")
         }
+    }
+
+    /// Kimi Code keeps the login token in a separate OAuth store.  The TOML
+    /// provider entry contains only a reference such as
+    /// `oauth = { storage = "file", key = "oauth/kimi-code" }`; treating
+    /// config.toml as a flat credential file therefore loses the real token.
+    private static func loadKimiCode(provider: String, home: URL,
+                                     environment: [String: String]) throws -> LocalSubscriptionCredential {
+        let configured = nonempty(environment["KIMI_CODE_HOME"])
+            ?? nonempty(environment["KIMI_HOME"])
+        let root = configured.map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? home.appendingPathComponent(".kimi-code", isDirectory: true)
+        let credentialsDirectory = root.appendingPathComponent("credentials", isDirectory: true)
+        var fileCandidates: [URL] = []
+        var keyringCandidates: [String] = []
+
+        // Read the config only to resolve OAuth references. A configured API
+        // key is not used as the subscription login when an OAuth file exists.
+        for configURL in [root.appendingPathComponent("config.toml"),
+                          root.appendingPathComponent("config.json")] {
+            guard let data = try? readFile(configURL),
+                  let config = configObject(data, toml: configURL.pathExtension == "toml") else { continue }
+            for reference in kimiOAuthReferences(config) {
+                if reference.storage == "keyring" {
+                    keyringCandidates.append(reference.key)
+                } else if let file = credentialFile(directory: credentialsDirectory, key: reference.key) {
+                    fileCandidates.append(file)
+                }
+            }
+        }
+
+        // Current kimi-cli uses oauth/kimi-code, which is written as
+        // credentials/kimi-code.json.  Include this known path even when the
+        // config was partially written or is being migrated.
+        if let known = credentialFile(directory: credentialsDirectory, key: "oauth/kimi-code") {
+            fileCandidates.append(known)
+        }
+        // Older releases and local test fixtures used a single credentials or
+        // auth file.  Keep those paths after the OAuth store so a real login
+        // token is selected before an unrelated API key in config.toml.
+        fileCandidates.append(contentsOf: [
+            root.appendingPathComponent("credentials.json"),
+            root.appendingPathComponent("auth.json")
+        ])
+        if let entries = try? FileManager.default.contentsOfDirectory(atPath: credentialsDirectory.path) {
+            for entry in entries.sorted() where entry.hasSuffix(".json") && entry != "config.json" {
+                fileCandidates.append(credentialsDirectory.appendingPathComponent(entry))
+            }
+        }
+
+        var seen = Set<String>()
+        for url in fileCandidates where seen.insert(url.standardizedFileURL.path).inserted {
+            guard let data = try? readFile(url),
+                  let converted = normalizeKimi(data, provider: provider, identity: url.lastPathComponent) else { continue }
+            return .init(provider: provider, source: url.path, data: converted)
+        }
+        for key in keyringCandidates where !key.isEmpty {
+            guard let data = try? readKimiKeychain(key: key),
+                  let converted = normalizeKimi(data, provider: provider, identity: key) else { continue }
+            return .init(provider: provider, source: "Kimi Code · macOS 钥匙串", data: converted)
+        }
+        // A GUI-launched BridgeDock does not inherit a shell's
+        // KIMI_CODE_HOME. Keep the documented config-directory override
+        // discoverable when the CLI was launched from a shell.
+        if configured == nil {
+            let alternate = home.appendingPathComponent(".config/kimi-code", isDirectory: true)
+            var fallbackEnvironment = environment
+            fallbackEnvironment["KIMI_CODE_HOME"] = alternate.path
+            if let fallback = try? loadKimiCode(provider: provider, home: home, environment: fallbackEnvironment) {
+                return fallback
+            }
+        }
+        throw missing(provider)
+    }
+
+    private struct KimiOAuthReference {
+        let storage: String
+        let key: String
+    }
+
+    private static func kimiOAuthReferences(_ root: [String: Any]) -> [KimiOAuthReference] {
+        var result: [KimiOAuthReference] = []
+        func inspect(_ value: Any, name: String) {
+            guard let provider = value as? [String: Any] else { return }
+            let type = nonempty(provider["type"])?.lowercased() ?? ""
+            let looksLikeKimi = ["kimi", "kimi-ai"].contains(type) || name.lowercased().contains("kimi")
+            guard looksLikeKimi, let oauth = provider["oauth"] as? [String: Any],
+                  let key = nonempty(oauth["key"]) else { return }
+            result.append(.init(storage: nonempty(oauth["storage"])?.lowercased() ?? "file", key: key))
+        }
+        if let providers = root["providers"] as? [String: Any] {
+            for (name, value) in providers { inspect(value, name: name) }
+        }
+        if let services = root["services"] as? [String: Any] {
+            for (name, value) in services { inspect(value, name: name) }
+        }
+        return result
+    }
+
+    private static func credentialFile(directory: URL, key: String) -> URL? {
+        let raw = key.split(separator: "/", omittingEmptySubsequences: true).last.map(String.init) ?? ""
+        guard raw.range(of: "^[A-Za-z0-9._-]{1,128}$", options: .regularExpression) != nil else { return nil }
+        let filename = raw.hasSuffix(".json") ? raw : raw + ".json"
+        return directory.appendingPathComponent(filename, isDirectory: false)
+    }
+
+    private static func normalizeKimi(_ data: Data, provider: String, identity: String) -> Data? {
+        guard let source = try? object(data) else { return nil }
+        var root = source
+        // A few clients wrap the OAuthToken object in a `token`/`oauth` table.
+        for key in ["token", "oauth", "credentials", "auth"] {
+            if let nested = root[key] as? [String: Any] {
+                for (name, value) in nested where (value is String || value is NSNumber) && root[name] == nil {
+                    root[name] = value
+                }
+            }
+        }
+        for (from, to) in [("accessToken", "access_token"), ("refreshToken", "refresh_token"),
+                           ("idToken", "id_token"), ("expiresAt", "expires_at"),
+                           ("expiresIn", "expires_in"), ("tokenType", "token_type")] {
+            if root[to] == nil, let value = root[from] { root[to] = value }
+        }
+        root["type"] = provider
+        root["local_identity"] = "kimi-code/" + identity
+        guard let flattened = try? JSONSerialization.data(withJSONObject: root, options: [.sortedKeys]) else { return nil }
+        return try? normalized(flattened, provider: provider)
+    }
+
+    private static func configObject(_ data: Data, toml: Bool) -> [String: Any]? {
+        if !toml { return try? object(data) }
+        return tomlObject(data)
+    }
+
+    private static func loadGeneric(provider: String, home: URL, environment: [String: String]) throws -> LocalSubscriptionCredential {
+        let candidates: [URL]
+        switch provider {
+        case "kimi", "kimi-ai":
+            let root = nonempty(environment["KIMI_HOME"]).map { URL(fileURLWithPath: $0, isDirectory: true) }
+                ?? home.appendingPathComponent(".kimi-code", isDirectory: true)
+            candidates = [root.appendingPathComponent("credentials.json"), root.appendingPathComponent("auth.json"),
+                          root.appendingPathComponent("config.json"), root.appendingPathComponent("config.toml"),
+                          home.appendingPathComponent(".config/kimi-code/credentials.json"),
+                          home.appendingPathComponent(".config/kimi-code/auth.json"),
+                          home.appendingPathComponent(".kimi/config.json")]
+        case "xai":
+            candidates = [home.appendingPathComponent(".grok/auth.json"), home.appendingPathComponent(".config/grok/auth.json"),
+                          home.appendingPathComponent(".config/xai/auth.json"),
+                          home.appendingPathComponent("Library/Application Support/Grok/auth.json")]
+        case "cursor-agent-v1":
+            candidates = [home.appendingPathComponent(".cursor/auth.json"), home.appendingPathComponent(".cursor-agent/auth.json"),
+                          home.appendingPathComponent("Library/Application Support/Cursor/auth.json")]
+        default:
+            candidates = [home.appendingPathComponent(".zcode/auth.json"), home.appendingPathComponent(".config/zcode/auth.json"),
+                          home.appendingPathComponent("Library/Application Support/ZCode/auth.json"),
+                          home.appendingPathComponent("Library/Application Support/ZCode/accounts.json")]
+        }
+        for url in candidates {
+            guard let data = try? readFile(url) else { continue }
+            let converted = normalizeGeneric(data, provider: provider, toml: url.pathExtension.lowercased() == "toml")
+            if let converted {
+                return .init(provider: provider, source: url.path, data: converted)
+            }
+        }
+        throw missing(provider)
+    }
+
+    private static func normalizeGeneric(_ data: Data, provider: String, toml: Bool) -> Data? {
+        let source = toml ? (try? JSONSerialization.data(withJSONObject: tomlObject(data))) : data
+        guard let source else { return nil }
+        if let converted = try? normalized(source, provider: provider) { return converted }
+        guard var root = try? object(source) else { return nil }
+        // Kimi, Grok and small third-party clients commonly wrap the token in
+        // `auth`, `credentials` or `account`. Merge only scalar fields from
+        // those known containers; unrelated settings stay out of the import.
+        for key in ["auth", "credentials", "account", "login", "session", "token_data"] {
+            if let nested = root[key] as? [String: Any] {
+                for (name, value) in nested where (value is String || value is NSNumber) && root[name] == nil { root[name] = value }
+            }
+        }
+        for (from, to) in [("accessToken", "access_token"), ("refreshToken", "refresh_token"),
+                           ("idToken", "id_token"), ("expiresAt", "expires_at"),
+                           ("expiresIn", "expires_in"), ("tokenType", "token_type")] {
+            if root[to] == nil, let value = root[from] { root[to] = value }
+        }
+        root["type"] = provider
+        guard let flattened = try? JSONSerialization.data(withJSONObject: root) else { return nil }
+        return try? normalized(flattened, provider: provider)
+    }
+
+    private static func tomlObject(_ data: Data) -> [String: Any] {
+        let text = String(decoding: data, as: UTF8.self)
+        var result: [String: Any] = [:]
+        var table: [String] = []
+        for raw in text.components(separatedBy: .newlines) {
+            let line = tomlStripComment(raw).trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("[") && line.hasSuffix("]") {
+                let header = String(line.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+                table = tomlPath(header)
+                _ = tomlDictionary(table, in: &result)
+                continue
+            }
+            guard let equal = line.firstIndex(of: "=") else { continue }
+            let key = String(line[..<equal]).trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            let value = String(line[line.index(after: equal)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty, !value.isEmpty, let parsed = tomlValue(value) else { continue }
+            var path = table
+            path.append(contentsOf: tomlPath(key))
+            tomlSet(parsed, at: path, in: &result)
+        }
+        return result
+    }
+
+    private static func tomlStripComment(_ line: String) -> String {
+        var quoted: Character?
+        var escaped = false
+        for index in line.indices {
+            let character = line[index]
+            if escaped { escaped = false; continue }
+            if character == "\\" && quoted == "\"" { escaped = true; continue }
+            if character == "\"" || character == "'" {
+                if quoted == character { quoted = nil } else if quoted == nil { quoted = character }
+            } else if character == "#" && quoted == nil {
+                return String(line[..<index])
+            }
+        }
+        return line
+    }
+
+    private static func tomlPath(_ text: String) -> [String] {
+        text.split(separator: ".", omittingEmptySubsequences: true).map {
+            String($0).trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+        }.filter { !$0.isEmpty }
+    }
+
+    private static func tomlValue(_ raw: String) -> Any? {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.count >= 2,
+           (value.first == "\"" && value.last == "\"") || (value.first == "'" && value.last == "'") {
+            return String(value.dropFirst().dropLast())
+        }
+        if value == "true" { return true }
+        if value == "false" { return false }
+        if let number = Double(value) { return number }
+        if value.hasPrefix("[") && value.hasSuffix("]") {
+            return tomlSplit(value.dropFirst().dropLast().description).compactMap(tomlValue)
+        }
+        if value.hasPrefix("{") && value.hasSuffix("}") {
+            var object: [String: Any] = [:]
+            for item in tomlSplit(value.dropFirst().dropLast().description) {
+                guard let equal = item.firstIndex(of: "=") else { continue }
+                let key = String(item[..<equal]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                let rawValue = String(item[item.index(after: equal)...])
+                if let parsed = tomlValue(rawValue) { object[key] = parsed }
+            }
+            return object
+        }
+        return value
+    }
+
+    private static func tomlSplit(_ text: String) -> [String] {
+        var result: [String] = []
+        var start = text.startIndex
+        var quote: Character?
+        var depth = 0
+        var escaped = false
+        for index in text.indices {
+            let character = text[index]
+            if escaped { escaped = false; continue }
+            if character == "\\" && quote == "\"" { escaped = true; continue }
+            if character == "\"" || character == "'" {
+                if quote == character { quote = nil } else if quote == nil { quote = character }
+            } else if quote == nil {
+                if character == "[" || character == "{" { depth += 1 }
+                if character == "]" || character == "}" { depth -= 1 }
+                if character == "," && depth == 0 {
+                    result.append(String(text[start..<index]).trimmingCharacters(in: .whitespacesAndNewlines))
+                    start = text.index(after: index)
+                }
+            }
+        }
+        let tail = String(text[start...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if !tail.isEmpty { result.append(tail) }
+        return result
+    }
+
+    private static func tomlDictionary(_ path: [String], in root: inout [String: Any]) -> [String: Any] {
+        guard let first = path.first else { return root }
+        if path.count == 1 {
+            if root[first] == nil { root[first] = [String: Any]() }
+            return root[first] as? [String: Any] ?? [:]
+        }
+        var child = root[first] as? [String: Any] ?? [:]
+        let remainder = Array(path.dropFirst())
+        _ = tomlDictionary(remainder, in: &child)
+        root[first] = child
+        return child
+    }
+
+    private static func tomlSet(_ value: Any, at path: [String], in root: inout [String: Any]) {
+        guard let first = path.first else { return }
+        if path.count == 1 { root[first] = value; return }
+        var child = root[first] as? [String: Any] ?? [:]
+        tomlSet(value, at: Array(path.dropFirst()), in: &child)
+        root[first] = child
     }
 
     private static func loadFile(_ url: URL, provider: String) throws -> LocalSubscriptionCredential {
@@ -300,6 +613,24 @@ enum LocalSubscriptionCredentials {
         return data
     }
 
+    private static func readKimiKeychain(key: String) throws -> Data? {
+        guard key.range(of: "^[A-Za-z0-9_./-]{1,128}$", options: .regularExpression) != nil else { return nil }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = ["find-generic-password", "-s", "kimi-code", "-a", key, "-w"]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        let timeout = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 15, execute: timeout)
+        defer { timeout.cancel() }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0, !data.isEmpty, data.count <= limit else { return nil }
+        return data
+    }
+
     private static func object(_ data: Data) throws -> [String: Any] {
         guard data.count <= limit,
               let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any], !value.isEmpty else {
@@ -313,12 +644,19 @@ enum LocalSubscriptionCredentials {
         switch provider {
         case "anthropic": return "claude"
         case "gpt", "chatgpt": return "codex"
+        case "kimi-code", "kimi-code-cn": return "kimi"
+        case "kimi-code-ai": return "kimi-ai"
+        case "grok", "grok-build", "xai-cli": return "xai"
+        case "cursor", "cursor-agent", "cursor-agent-v1": return "cursor-agent-v1"
+        case "zcode-bigmodel", "zcode-zai", "zai": return "zcode"
         default: return provider.lowercased()
         }
     }
 
     private static func missing(_ provider: String) -> LocalSubscriptionError {
-        let title = ["claude": "Claude Code", "codex": "Codex / ChatGPT", "kiro": "Kiro"][provider] ?? provider
+        let title = ["claude": "Claude Code", "codex": "Codex / ChatGPT", "kiro": "Kiro",
+                     "kimi": "Kimi Code 国内", "kimi-ai": "Kimi Code 国际",
+                     "xai": "Grok Build", "cursor-agent-v1": "Cursor", "zcode": "ZCode"][provider] ?? provider
         return .message("未找到 \(title) 的本机登录凭据，请先在对应客户端登录，或使用浏览器授权。")
     }
 

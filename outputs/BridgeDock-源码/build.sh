@@ -14,7 +14,7 @@ mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources"
 # SWIFT_EXTRA_FLAGS lets sandboxed shells pass -disable-sandbox.
 xcrun swiftc ${SWIFT_EXTRA_FLAGS:-} -O -swift-version 5 -target arm64-apple-macosx14.0 Sources/*.swift \
   -o "$STAGE/Contents/MacOS/BridgeDock" -framework SwiftUI -framework AppKit -framework CryptoKit
-cp Vendor/cli-proxy-api Vendor/*.dylib "$STAGE/Contents/Resources/"
+cp Vendor/cli-proxy-api Vendor/kiro2cc-proxy Vendor/*.dylib "$STAGE/Contents/Resources/"
 cp Vendor/*LICENSE "$STAGE/Contents/Resources/"
 cp Vendor/*NOTICE* "$STAGE/Contents/Resources/"
 cp -R Resources/CursorLocal Resources/AgentIcons "$STAGE/Contents/Resources/"
@@ -35,21 +35,27 @@ cat > "$STAGE/Contents/Info.plist" <<'PLIST'
 <key>CFBundleExecutable</key><string>BridgeDock</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleIconFile</key><string>BridgeDock</string>
-<key>CFBundleShortVersionString</key><string>1.4.11</string>
-<key>CFBundleVersion</key><string>22</string>
+<key>CFBundleShortVersionString</key><string>1.4.20</string>
+<key>CFBundleVersion</key><string>31</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
+<key>CFBundleURLTypes</key><array><dict>
+<key>CFBundleURLName</key><string>local.bridgedock.app.ccswitch-import</string>
+<key>CFBundleTypeRole</key><string>Viewer</string>
+<key>CFBundleURLSchemes</key><array><string>ccswitch</string></array>
+</dict></array>
 <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
 </dict></plist>
 PLIST
-/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${BRIDGEDOCK_VERSION:-1.4.11}" "$STAGE/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BRIDGEDOCK_BUILD:-22}" "$STAGE/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${BRIDGEDOCK_VERSION:-1.4.20}" "$STAGE/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BRIDGEDOCK_BUILD:-31}" "$STAGE/Contents/Info.plist"
 find "$STAGE" -name '._*' -delete
 xattr -cr "$STAGE"
 for library in "$STAGE/Contents/Resources/"*.dylib; do
   codesign --force --sign - "$library"
 done
 codesign --force --sign - "$STAGE/Contents/Resources/cli-proxy-api"
+codesign --force --sign - "$STAGE/Contents/Resources/kiro2cc-proxy"
 codesign --force --deep --sign - "$STAGE"
 codesign --verify --deep --strict "$STAGE"
 

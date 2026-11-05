@@ -55,34 +55,74 @@ struct QuotaTarget: Identifiable {
     let id: String
     let title: String
     let subtitle: String
+    let group: String
     let account: Account?
     let channel: Channel?
     let fingerprint: String
+    let queryAvailable: Bool
+    let queryHint: String
 
     init(account: Account) {
         id = "account:" + account.name
         title = account.email
-        subtitle = account.provider + " · 订阅账号"
+        group = account.providerTitle + " 订阅"
+        subtitle = account.note.isEmpty ? "订阅账号" : account.note
         self.account = account
         channel = nil
         fingerprint = Self.hash([account.name, account.authIndex, account.email, account.provider, account.accountID, String(account.disabled)])
+        let provider = Self.normalizedProvider(account)
+        queryAvailable = !account.runtimeOnly && Self.quotaProviders.contains(provider)
+        if account.runtimeOnly {
+            queryHint = "这是运行时临时凭据，没有可读取的账户区域信息。"
+        } else if !Self.quotaProviders.contains(provider) {
+            queryHint = "该订阅服务暂未提供统一额度接口，请在服务商账户页查看。"
+        } else {
+            queryHint = ""
+        }
     }
 
     init(channel: Channel) {
         id = "channel:" + channel.id
         title = channel.name
+        group = "API 渠道"
         subtitle = channel.prefix + " · API 渠道"
         account = nil
         self.channel = channel
         fingerprint = Self.hash([channel.id, channel.baseURL, channel.apiKey, channel.balanceMode.rawValue, channel.balancePath, channel.proxyURL, String(channel.enabled), channel.credentialSource, channel.desktopAccountHash])
+        queryAvailable = channel.effectiveBalanceMode != .unavailable
+        queryHint = queryAvailable ? "" : "此渠道未配置可识别的余额接口；在渠道设置中选择查询类型，或填写自定义余额路径。"
     }
 
     private static func hash(_ parts: [String]) -> String {
         SHA256.hash(data: Data(parts.joined(separator: "\0").utf8)).map { String(format: "%02x", $0) }.joined()
     }
+
+    private static let quotaProviders: Set<String> = ["claude", "codex", "kimi", "kimi-ai", "kiro", "xai", "zcode"]
+
+    private static func normalizedProvider(_ account: Account) -> String {
+        switch account.provider.lowercased() {
+        case "anthropic": return "claude"
+        case "gpt", "chatgpt": return "codex"
+        case "grok": return "xai"
+        case "zcode-bigmodel", "zcode-zai", "zai": return "zcode"
+        default: return account.provider.lowercased()
+        }
+    }
 }
 
 enum QuotaParser {
+    /// Empty metric rows made the balance page look like a list of failed
+    /// queries. Keep pending explanatory rows, but hide entries with no value,
+    /// reset date or note.
+    static func displayable(_ metric: QuotaMetric) -> Bool {
+        metric.used != nil || metric.limit != nil || metric.remaining != nil || metric.usedPercentage != nil
+            || metric.unlimited || metric.reset != nil || !metric.note.isEmpty
+    }
+
+    static func displayMetrics(_ snapshot: QuotaSnapshot) -> [QuotaMetric] {
+        snapshot.metrics.filter(displayable)
+    }
+
     static func zcode(_ data: [String: Any]) -> QuotaSnapshot {
         let subscription = data["subscription"] as? [String: Any] ?? [:]
         let tier = string(subscription["tierName"] ?? subscription["tier_name"])
@@ -205,9 +245,24 @@ enum QuotaParser {
                                                 percentage: percentage, reset: reset(row)))
         }
         if let rows = data["limits"] as? [[String: Any]] {
+            // `limits` restates the windows above under new kind names; only keep entries with no counterpart.
+            let aliases = ["session": "five_hour", "weekly_all": "seven_day", "weekly_opus": "seven_day_opus",
+                           "weekly_sonnet": "seven_day_sonnet", "weekly_oauth_apps": "seven_day_oauth_apps", "weekly_cowork": "seven_day_cowork"]
+            let kindNames = ["session": "5 小时额度", "weekly_all": "7 天额度", "weekly": "7 天额度"]
             for (index, row) in rows.enumerated() {
-                let model = ((row["scope"] as? [String: Any])?["model"] as? [String: Any])?["display_name"]
-                snapshot.metrics.append(QuotaMetric(id: "limit-\(index)", title: string(model) ?? string(row["kind"]) ?? "额度 \(index + 1)", percentage: percent(row["percent"]), reset: reset(row)))
+                let kind = string(row["kind"])
+                let percentage = percent(row["percent"] ?? row["utilization"])
+                let resetDate = reset(row)
+                if let kind, let alias = aliases[kind], snapshot.metrics.contains(where: { $0.id == alias }) { continue }
+                if snapshot.metrics.contains(where: { metric in
+                    metric.usedPercentage == percentage && percentage != nil
+                        && abs((metric.reset?.timeIntervalSince1970 ?? 0) - (resetDate?.timeIntervalSince1970 ?? 0)) < 120
+                }) { continue }
+                let model = string(((row["scope"] as? [String: Any])?["model"] as? [String: Any])?["display_name"])
+                let base = kind.flatMap { kindNames[$0] ?? aliases[$0].flatMap { names[$0] } }
+                let parts = [model, base].compactMap { $0 }
+                let title = parts.isEmpty ? "其他额度 \(index + 1)" : parts.joined(separator: " · ")
+                snapshot.metrics.append(QuotaMetric(id: "limit-\(index)", title: title, percentage: percentage, reset: resetDate))
             }
         }
         if let extra = data["extra_usage"] as? [String: Any] {
@@ -249,11 +304,53 @@ enum QuotaParser {
 
     static func kimi(_ data: [String: Any]) -> QuotaSnapshot {
         var result = QuotaSnapshot(source: "Kimi Code 账户额度接口")
-        var items = data["limits"] as? [[String: Any]] ?? []
-        if let usage = data["usage"] as? [String: Any] { items.append(["detail": usage, "name": "订阅额度"]) }
+        // New Kimi Code plans report quota windows as ratios rather than
+        // request counts.  Keep these as percentage-only metrics so a value
+        // such as 0.25 is rendered as 25%, not as 0.25 units of quota.
+        let payload: [String: Any]
+        if let envelope = data["data"] as? [String: Any], let quota = envelope["quota"] as? [String: Any] {
+            payload = quota
+        } else {
+            payload = data
+        }
+        let usages = payload["usages"] as? [String: Any] ?? [:]
+        let ratioWindows: [(key: String, aliases: [String], title: String)] = [
+            ("limit_5h", ["limit_5h", "limit5h"], "5 小时额度"),
+            ("limit_7d", ["limit_7d", "limit7d"], "周额度"),
+            ("limit_month_total", ["limit_month_total", "monthTotal"], "月度额度")
+        ]
+        var ratioKeys = Set<String>()
+        var ratioMetrics: [QuotaMetric] = []
+        for window in ratioWindows {
+            guard let row = window.aliases.lazy.compactMap({ usages[$0] as? [String: Any] }).first,
+                  let ratio = percent(row["used_ratio"] ?? row["usedRatio"]), ratio <= 1 else { continue }
+            let metric = QuotaMetric(id: "kimi-\(window.key)", title: window.title,
+                                     percentage: ratio * 100, reset: reset(row))
+            if displayable(metric) {
+                ratioMetrics.append(metric)
+                ratioKeys.insert(window.key)
+            }
+        }
+
+        // Older accounts expose counts in `usage` and `limits`; retain that
+        // fallback for windows the server did not provide as a percentage.
+        var items = payload["limits"] as? [[String: Any]] ?? []
+        if let usage = payload["usage"] as? [String: Any] { items.append(["detail": usage, "name": "订阅额度"]) }
         for (index, item) in items.enumerated() {
             let detail = item["detail"] as? [String: Any] ?? item
             let window = item["window"] as? [String: Any] ?? [:]
+            let unit = string(window["timeUnit"])?.uppercased().replacingOccurrences(of: "TIME_UNIT_", with: "")
+            let length = number(window["duration"]).map { NSDecimalNumber(decimal: $0).doubleValue }
+            let legacyKey: String?
+            if item["name"] as? String == "订阅额度" {
+                legacyKey = "limit_7d"
+            } else if let length, let unit {
+                let minutes = unit == "MINUTE" ? length : unit == "HOUR" ? length * 60 : unit == "DAY" ? length * 1440 : unit == "WEEK" ? length * 10080 : -1
+                legacyKey = abs(minutes - 300) < 0.1 ? "limit_5h" : nil
+            } else {
+                legacyKey = nil
+            }
+            if let legacyKey, ratioKeys.contains(legacyKey) { continue }
             var title = string(item["name"] ?? item["title"] ?? detail["name"]) ?? "额度窗口 \(index + 1)"
             if let length = number(window["duration"]), let unit = string(window["timeUnit"]) {
                 let names = ["MINUTE": "分钟", "HOUR": "小时", "DAY": "天", "WEEK": "周", "MONTH": "月"]
@@ -264,11 +361,10 @@ enum QuotaParser {
             let remaining = number(detail["remaining"])
             var used = number(detail["used"])
             if used == nil, let limit, let remaining { used = max(0, limit - remaining) }
-            result.metrics.append(QuotaMetric(id: "kimi-\(index)", title: title, used: used, limit: limit, remaining: remaining, reset: reset(detail) ?? reset(item)))
+            let metric = QuotaMetric(id: "kimi-\(index)", title: title, used: used, limit: limit, remaining: remaining, reset: reset(detail) ?? reset(item))
+            if displayable(metric) { result.metrics.append(metric) }
         }
-        if let monthly = (data["usages"] as? [String: Any])?["limit_month_total"] as? [String: Any] {
-            result.metrics.append(QuotaMetric(id: "monthly", title: "月度额度", percentage: percent(monthly["used_ratio"]).map { $0 * 100 }, reset: reset(monthly)))
-        }
+        result.metrics.append(contentsOf: ratioMetrics)
         return result
     }
 
@@ -286,16 +382,20 @@ enum QuotaParser {
         let limit = cents(config["monthlyLimit"] ?? config["monthly_limit"])
         let used = cents(config["used"])
         if limit != nil || used != nil {
-            result.metrics.append(QuotaMetric(id: label + "-monthly", title: "月度订阅预算", used: used, limit: limit, unit: "USD", reset: date(config["billingPeriodEnd"] ?? config["billing_period_end"])))
+            let metric = QuotaMetric(id: label + "-monthly", title: "月度订阅预算", used: used, limit: limit, unit: "USD", reset: date(config["billingPeriodEnd"] ?? config["billing_period_end"]))
+            if displayable(metric) { result.metrics.append(metric) }
         }
         if let balance = cents(config["prepaidBalance"] ?? config["prepaid_balance"]) {
-            result.metrics.append(QuotaMetric(id: label + "-balance", title: "预付余额", remaining: balance, unit: "USD"))
+            let metric = QuotaMetric(id: label + "-balance", title: "预付余额", remaining: balance, unit: "USD")
+            if displayable(metric) { result.metrics.append(metric) }
         }
         let overage = cents(config["onDemandUsed"] ?? config["on_demand_used"])
         let cap = cents(config["onDemandCap"] ?? config["on_demand_cap"])
         if overage != nil || cap != nil { result.metrics.append(QuotaMetric(id: label + "-overage", title: "按量用量预算", used: overage, limit: cap, unit: "USD")) }
         for (index, item) in (config["productUsage"] as? [[String: Any]] ?? []).enumerated() {
-            result.metrics.append(QuotaMetric(id: label + "-product-\(index)", title: string(item["product"]) ?? "产品 \(index + 1)", percentage: percent(item["usagePercent"] ?? item["usage_percent"]), reset: end))
+            let usage = percent(item["usagePercent"] ?? item["usage_percent"])
+            let metric = QuotaMetric(id: label + "-product-\(index)", title: string(item["product"]) ?? "产品 \(index + 1)", percentage: usage, reset: usage == nil ? nil : end)
+            if displayable(metric) { result.metrics.append(metric) }
         }
         return result
     }
@@ -309,16 +409,17 @@ enum QuotaParser {
             func metric(_ row: [String: Any], id: String, title: String, reset: Date?) -> QuotaMetric {
                 QuotaMetric(id: id, title: title, used: number(row["currentUsageWithPrecision"] ?? row["currentUsage"]), limit: number(row["usageLimitWithPrecision"] ?? row["usageLimit"]), unit: string(item["unit"]) ?? "credits", reset: reset)
             }
-            result.metrics.append(metric(item, id: "kiro-\(index)", title: title, reset: resetDate))
+            let main = metric(item, id: "kiro-\(index)", title: title, reset: resetDate)
+            if displayable(main) { result.metrics.append(main) }
             if let trial = item["freeTrialInfo"] as? [String: Any] {
                 var row = metric(trial, id: "trial-\(index)", title: title + " · 试用额度", reset: date(trial["freeTrialExpiry"]))
                 row.note = string(trial["freeTrialStatus"]) ?? ""
-                result.metrics.append(row)
+                if displayable(row) { result.metrics.append(row) }
             }
             for (bonusIndex, bonus) in (item["bonuses"] as? [[String: Any]] ?? []).enumerated() {
                 var row = metric(bonus, id: "bonus-\(index)-\(bonusIndex)", title: string(bonus["displayName"]) ?? "奖励额度", reset: date(bonus["expiresAt"]))
                 row.note = string(bonus["status"]) ?? ""
-                result.metrics.append(row)
+                if displayable(row) { result.metrics.append(row) }
             }
         }
         return result
@@ -341,9 +442,11 @@ enum QuotaParser {
                 if let amount = number(body[key]) { result.metrics.append(QuotaMetric(id: key, title: title, remaining: amount, unit: currency)) }
             }
         case .newAPI:
-            result.metrics.append(QuotaMetric(id: "token", title: "此令牌额度", used: number(body["total_used"]), limit: number(body["total_granted"]), remaining: number(body["total_available"]), unit: "站内额度", unlimited: body["unlimited_quota"] as? Bool ?? false))
+            let token = QuotaMetric(id: "token", title: "此令牌额度", used: number(body["total_used"]), limit: number(body["total_granted"]), remaining: number(body["total_available"]), unit: "站内额度", unlimited: body["unlimited_quota"] as? Bool ?? false)
+            if displayable(token) { result.metrics.append(token) }
             if let user = body["user_quota"] as? [String: Any] {
-                result.metrics.append(QuotaMetric(id: "user", title: "账户总额度", used: number(user["total_used"]), remaining: number(user["total_available"]), unit: "站内额度"))
+                let account = QuotaMetric(id: "user", title: "账户总额度", used: number(user["total_used"]), remaining: number(user["total_available"]), unit: "站内额度")
+                if displayable(account) { result.metrics.append(account) }
             } else { result.notes.append("接口仅提供当前令牌额度，账户总余额需服务商允许查询。站内额度按原值展示。") }
             if let expiry = date(body["expires_at"]) { result.details.append(QuotaDetail(label: "令牌到期", value: expiry.formatted(date: .abbreviated, time: .shortened))) }
         case .zhipu:
@@ -355,14 +458,46 @@ enum QuotaParser {
                     let units: [Double: String] = [3: "小时", 6: "周"]
                     title += " · \(amount(count)) \(units[unit] ?? "周期")"
                 } else { title += " \(index + 1)" }
-                result.metrics.append(QuotaMetric(id: "limit-\(index)", title: title, used: number(row["currentValue"]), limit: number(row["usage"]), remaining: number(row["remaining"]), unit: type == "TIME_LIMIT" ? "次" : type == "CREDIT_LIMIT" ? "积分" : "额度", percentage: percent(row["percentage"]), reset: reset(row)))
+                let metric = QuotaMetric(id: "limit-\(index)", title: title, used: number(row["currentValue"]), limit: number(row["usage"]), remaining: number(row["remaining"]), unit: type == "TIME_LIMIT" ? "次" : type == "CREDIT_LIMIT" ? "积分" : "额度", percentage: percent(row["percentage"]), reset: reset(row))
+                if displayable(metric) { result.metrics.append(metric) }
                 for (detailIndex, detail) in (row["usageDetails"] as? [[String: Any]] ?? []).enumerated() {
-                    result.metrics.append(QuotaMetric(id: "detail-\(index)-\(detailIndex)", title: string(detail["modelCode"] ?? detail["name"]) ?? "工具明细", used: number(detail["usage"] ?? detail["currentValue"]), unit: "次"))
+                    let metric = QuotaMetric(id: "detail-\(index)-\(detailIndex)", title: string(detail["modelCode"] ?? detail["name"]) ?? "工具明细", used: number(detail["usage"] ?? detail["currentValue"]), unit: "次")
+                    if displayable(metric) { result.metrics.append(metric) }
                 }
             }
+        case .sub2api:
+            let unit = string(data["unit"]) ?? "USD"
+            result.plan = string(data["planName"])
+            if let quota = data["quota"] as? [String: Any] {
+                result.metrics.append(QuotaMetric(id: "key-quota", title: "此令牌总额度", used: number(quota["used"]), limit: number(quota["limit"]),
+                                                  remaining: number(quota["remaining"]), unit: string(quota["unit"]) ?? unit))
+            }
+            for (index, row) in (data["rate_limits"] as? [[String: Any]] ?? []).enumerated() {
+                let windows = ["5h": "5 小时限额", "1d": "每日限额", "7d": "7 天限额"]
+                let window = string(row["window"]) ?? ""
+                result.metrics.append(QuotaMetric(id: "rate-\(index)", title: windows[window] ?? "周期限额 \(window)", used: number(row["used"]), limit: number(row["limit"]),
+                                                  remaining: number(row["remaining"]), unit: unit, reset: reset(row)))
+            }
+            if let plan = data["subscription"] as? [String: Any] {
+                for (key, title) in [("daily", "订阅 · 每日"), ("weekly", "订阅 · 每周"), ("monthly", "订阅 · 每月")] {
+                    let used = number(plan[key + "_usage_usd"]), limit = number(plan[key + "_limit_usd"])
+                    guard limit != nil else { continue }
+                    result.metrics.append(QuotaMetric(id: "plan-" + key, title: title, used: used, limit: limit, unit: "USD"))
+                }
+                if let expiry = date(plan["expires_at"]) { result.details.append(QuotaDetail(label: "订阅到期", value: expiry.formatted(date: .abbreviated, time: .shortened))) }
+            }
+            if result.metrics.isEmpty, let remaining = number(data["remaining"] ?? data["balance"]) {
+                result.metrics.append(QuotaMetric(id: "wallet", title: result.plan ?? "可用余额", remaining: remaining, unit: unit))
+            }
+            if let expiry = date(data["expires_at"]) { result.details.append(QuotaDetail(label: "令牌到期", value: expiry.formatted(date: .abbreviated, time: .shortened))) }
+            if let today = (data["usage"] as? [String: Any])?["today"] as? [String: Any], let cost = number(today["actual_cost"] ?? today["cost"]) {
+                result.details.append(QuotaDetail(label: "今日消费", value: amount(cost) + " " + unit))
+            }
+            if data["isValid"] as? Bool == false { result.notes.append("中转站报告此令牌不可用（\(string(data["status"]) ?? "状态未知")），请到中转站后台处理。") }
         case .custom:
             let unit = string(body["currency"] ?? body["unit"]) ?? "接口原始单位"
-            result.metrics.append(QuotaMetric(id: "custom", title: "接口余额", used: number(body["used"] ?? body["total_used"]), limit: number(body["limit"] ?? body["total_granted"]), remaining: number(body["balance"] ?? body["remaining"] ?? body["total_available"] ?? body["available_balance"]), unit: unit, reset: reset(body)))
+            let custom = QuotaMetric(id: "custom", title: "接口余额", used: number(body["used"] ?? body["total_used"]), limit: number(body["limit"] ?? body["total_granted"]), remaining: number(body["balance"] ?? body["remaining"] ?? body["total_available"] ?? body["available_balance"]), unit: unit, reset: reset(body))
+            if displayable(custom) { result.metrics.append(custom) }
         default: break
         }
         return result

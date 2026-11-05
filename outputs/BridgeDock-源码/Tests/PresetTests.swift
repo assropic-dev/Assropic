@@ -189,6 +189,32 @@ struct PresetTests {
         check(ModelListRequest.names(in: ["data": [["id": "live"]], "models": [["id": "stale"]]]) == ["live"],
               "The primary model response takes precedence over unrelated fallback data")
 
+        let presetFamilies = SourceFamily.allCases.flatMap(\.presetIDs)
+        check(Set(presetFamilies) == expectedIDs && presetFamilies.count == expectedIDs.count,
+              "Every API Key preset is offered under exactly one provider icon")
+        for entry in Preset.all where entry.id != "relay" {
+            let family = SourceFamily.of(entry.makeChannel(existing: []))
+            check(family.presetIDs.contains(entry.id), "A saved \(entry.id) channel is listed under the icon that offers it")
+        }
+        check(SourceFamily.of(customRoot) == .custom, "A custom relay is listed under the custom icon")
+        let listedProviders = Set(SourceFamily.allCases.flatMap(\.subscriptionIDs))
+        for provider in SubscriptionProvider.all where !["kimi-ai", "zcode-zai"].contains(provider.id) {
+            check(listedProviders.contains(provider.id), "Subscription login \(provider.id) has an add card under a provider icon")
+        }
+        for (provider, family) in [("claude", SourceFamily.claude), ("anthropic", .claude), ("codex", .gpt), ("kimi", .kimi), ("kimi-ai", .kimi),
+                                   ("kiro", .kiro), ("xai", .grok), ("zcode-bigmodel", .glm), ("zcode-zai", .glm), ("zcode", .glm)] {
+            check(SourceFamily.of(subscription: provider) == family, "Subscription \(provider) is grouped under \(family.title)")
+        }
+        func cursorAccount(_ profile: String) -> Account {
+            Account(["name": "cursor-" + profile + ".json", "provider": CursorAccountProfile.providerID, "runtime_profile": profile])
+        }
+        check(SourceFamily.of(cursorAccount(CursorAccountProfile.cursor.rawValue)) == .cursor
+              && SourceFamily.of(cursorAccount(CursorAccountProfile.grokBot.rawValue)) == .grok,
+              "Cursor and Grok Bot accounts on the same plugin are listed under their own icons")
+        var work = Channel()
+        work.credentialSource = "kimi-work-desktop"
+        check(work.isKimiWork && SourceFamily.of(work) == .kimi, "Kimi Work is listed under the Kimi icon")
+
         if failures.isEmpty {
             print("PASS \(count) preset, official-origin, model-discovery and Kimi correction assertions")
         } else {

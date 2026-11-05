@@ -1,113 +1,168 @@
 import Foundation
 
 extension BridgeStore {
-    // Work secrets are resolved only for the private core configuration. state.json
-    // retains an account binding, never a copy of the desktop's Work/Web tokens.
-    func settingsForCore(_ value: AppSettings) -> AppSettings {
-        let result = KimiWorkRouting.resolve(value)
-        if value.channels.indices.contains(where: { value.channels[$0].isKimiWork && value.channels[$0].enabled && !result.channels[$0].enabled }) {
-            kimiWorkStatus = "Work 登录不可用或账号已切换，通道已暂停。请在桌面端登录后重新连接。"
-        } else if result.channels.contains(where: { $0.isKimiWork && $0.enabled }) {
-            kimiWorkStatus = "本机 Work 已连接 · 会员月度共享额度"
+    var workCredentials: KimiWorkCredentialStore { KimiWorkCredentialStore(dataDirectory: dataDirectory) }
+
+    /// Import each old account once, then never consult the desktop again.
+    func migrateKimiWork(_ value: AppSettings) -> AppSettings {
+        var next = value
+        for index in next.channels.indices where next.channels[index].credentialSource == "kimi-work-desktop" {
+            let hash = next.channels[index].desktopAccountHash
+            do {
+                if (try? workCredentials.read(hash)) == nil {
+                    let imported = try KimiWorkSession.read(expectedAccountHash: hash)
+                    // Do not import/consume the desktop's refresh token.
+                    try workCredentials.save(imported)
+                }
+                if let catalog = KimiWorkCatalog.desktopCache(accountHash: hash) {
+                    next.channels[index].workModels = catalog
+                    next.channels[index].capabilities = catalog.mapValues(\.capability)
+                    next.channels[index].modelLines = KimiWorkCatalog.merging(Array(catalog.keys), into: next.channels[index].modelLines)
+                }
+                next.channels[index].credentialSource = "kimi-work"
+                next.channels[index].kind = "Kimi Work · 独立登录"
+                kimiWorkStatus = "Work 登录已迁移至 BridgeDock，不再依赖 Kimi 客户端。"
+            } catch {
+                kimiWorkStatus = "旧 Work 登录无法迁移，请点击网页登录。"
+            }
         }
-        return result
+        return next
     }
 
-    func kimiWorkFingerprint() -> String { KimiWorkRouting.fingerprint(settings) }
+    func settingsForCore(_ value: AppSettings) -> AppSettings {
+        KimiWorkRouting.resolve(value, read: workCredentials.read)
+    }
+
+    func kimiWorkFingerprint() -> String { KimiWorkRouting.fingerprint(settings, read: workCredentials.read) }
 
     func synchronizeKimiWork(force: Bool = false) async {
         guard running, !workSyncing, force || !busy else { return }
-        let fingerprint = kimiWorkFingerprint()
-        guard fingerprint != workAppliedFingerprint else { return }
         workSyncing = true
         defer { workSyncing = false }
+        for channel in settings.channels where channel.isKimiWork && channel.enabled {
+            guard let saved = try? workCredentials.read(channel.desktopAccountHash), saved.needsRefresh,
+                  let refreshToken = saved.refreshToken, !refreshToken.isEmpty,
+                  Date().timeIntervalSince(workRefreshAttempts[channel.id] ?? .distantPast) > 60 else { continue }
+            workRefreshAttempts[channel.id] = Date()
+            do {
+                let payload = try await workRequest(url: Self.workRefreshURL, token: refreshToken,
+                                                    body: ["refreshToken": refreshToken], proxy: channel.proxyURL)
+                guard let access = payload["accessToken"] as? String,
+                      let refresh = payload["refreshToken"] as? String,
+                      let userID = KimiWorkSession.claims(access)?["sub"] as? String,
+                      KimiWorkSession.digest("kimi-work-account\0" + userID) == saved.accountHash else {
+                    throw BridgeError.message("Work 返回的登录信息无效，请重新网页登录。")
+                }
+                try workCredentials.save(KimiWorkSession(apiKey: saved.apiKey, webToken: access,
+                                                         accountHash: saved.accountHash, refreshToken: refresh, ownsAPIKey: saved.ownsAPIKey))
+            } catch {
+                kimiWorkStatus = "Work 网页登录需要更新；已保存的模型 Key 继续独立使用。"
+            }
+        }
+        let fingerprint = kimiWorkFingerprint()
+        guard fingerprint != workAppliedFingerprint else { return }
         do {
             _ = try await request("/v8/management/config.yaml", method: "PUT", body: jsonData(coreDocument(settings)), contentType: "application/yaml")
             workAppliedFingerprint = fingerprint
-            if !fingerprint.contains("unavailable"), !fingerprint.isEmpty {
-                kimiWorkStatus = "本机 Work 登录已同步，使用会员月度共享额度。"
-            }
-        } catch {
-            kimiWorkStatus = "Work 凭据同步失败，请刷新或重新连接本机 Work。"
-        }
+            kimiWorkStatus = fingerprint.contains("unavailable") ? "Work 凭据不可用，请重新网页登录。" : "Work 已独立连接 · 会员月度共享额度"
+        } catch { kimiWorkStatus = "Work 配置同步失败，请刷新后重试。" }
     }
 
-    func connectKimiWork() async {
-        guard running, !busy, !workSyncing else { return }
+    static let workRefreshURL = "https://auth.kimi.com/api/account.gateway.v1.AuthService/RefreshToken"
+    static let workKeyURL = "https://www.kimi.com/apiv2/kimi.gateway.credentials.v1.APIKeyService/CreateAPIKey"
+    static let workQuotaURL = "https://www.kimi.com/apiv2/kimi.gateway.membership.v2.MembershipService/GetSubscriptionStats"
+
+    /// Called only after the user has signed into the dedicated BridgeDock web view.
+    func connectKimiWork(accessToken: String, refreshToken: String) async throws {
+        guard running, !busy, !workSyncing else { throw BridgeError.message("请等待当前操作完成后重试。") }
+        guard let userID = KimiWorkSession.claims(accessToken)?["sub"] as? String, !userID.isEmpty else {
+            throw BridgeError.message("未取得有效的 Kimi 登录，请重新登录。")
+        }
         busy = true
-        kimiWorkStatus = "正在读取本机 Work 登录并查询模型…"
-        do {
-            let session = try KimiWorkSession.read()
-            let payload = try await kimiWorkRequest(path: KimiWorkSession.baseURL + "/models", token: session.apiKey)
-            let names = ModelListRequest.names(in: payload)
-            guard !names.isEmpty else { throw BridgeError.message("Work 网关没有返回模型，请在 Kimi 桌面端重新登录后再试。") }
-            _ = try KimiWorkSession.read(expectedAccountHash: session.accountHash)
-            var channel: Channel
-            if let existing = settings.channels.first(where: \.isKimiWork) { channel = existing }
-            else {
-                channel = Channel()
-                channel.name = "Kimi Work"
-                channel.prefix = Channel.unusedPrefix("kimi-work", channels: settings.channels, accounts: accounts)
-            }
-            let sameAccount = channel.desktopAccountHash == session.accountHash
-            channel.kind = "Kimi Work · 本机桌面登录"
-            channel.credentialSource = "kimi-work-desktop"
-            channel.desktopAccountHash = session.accountHash
-            channel.apiKey = ""
-            channel.baseURL = KimiWorkSession.baseURL
-            channel.wire = .chat
-            channel.balanceMode = .kimiWork
-            channel.balancePath = ""
-            channel.enabled = true
-            if !sameAccount || channel.modelLines.isEmpty { channel.modelLines = names.joined(separator: "\n") }
-            channel.capabilities = ModelListRequest.capabilities(in: payload)
-            busy = false
-            try await saveChannel(channel)
-            kimiWorkStatus = "Work 已连接 · \(names.count) 个模型 · 前缀 \(channel.prefix) · 会员月度共享额度"
-            record("已连接本机 Kimi Work 独立网关")
-        } catch {
-            busy = false
-            kimiWorkStatus = error.localizedDescription
-            report(error)
+        defer { busy = false }
+        let hash = KimiWorkSession.digest("kimi-work-account\0" + userID)
+        let existing = settings.channels.first { $0.isKimiWork && $0.desktopAccountHash == hash }
+        let proxy = existing?.proxyURL ?? ""
+        let payload = try await workRequest(url: KimiWorkCatalog.endpoint, token: accessToken, body: [:], proxy: proxy)
+        let catalog = try KimiWorkCatalog.parse(payload)
+        let previous = try? workCredentials.read(hash)
+        // A new web login also detaches imported desktop keys, which that client
+        // may revoke on sign-out. Only reuse keys originally issued for BridgeDock.
+        var key = previous?.ownsAPIKey == true ? previous?.apiKey : nil
+        if let oldKey = key, (try? await workRequest(url: KimiWorkSession.baseURL + "/models", token: oldKey, proxy: proxy)) == nil { key = nil }
+        if key == nil {
+            let issued = try await workRequest(url: Self.workKeyURL, token: accessToken,
+                                               body: ["apiKey": ["name": "BridgeDock", "scope": ["FEATURE_WORK"]]], proxy: proxy)
+            key = (issued["apiKey"] as? [String: Any])?["key"] as? String
         }
+        guard let key, !key.isEmpty else { throw BridgeError.message("Kimi 未签发 Work Key，请重新登录后重试。") }
+        let session = KimiWorkSession(apiKey: key, webToken: accessToken, accountHash: hash,
+                                      refreshToken: refreshToken.isEmpty ? nil : refreshToken, ownsAPIKey: true)
+        try workCredentials.save(session)
+        var channel = existing ?? Channel()
+        if existing == nil {
+            channel.name = "Kimi Work"
+            channel.prefix = Channel.unusedPrefix("kimi-work", channels: settings.channels, accounts: accounts)
+        }
+        channel.kind = "Kimi Work · 独立登录"
+        channel.credentialSource = "kimi-work"
+        channel.desktopAccountHash = hash
+        channel.apiKey = ""
+        channel.baseURL = KimiWorkSession.baseURL
+        channel.wire = .chat
+        channel.balanceMode = .kimiWork
+        channel.workModels = catalog
+        channel.capabilities = catalog.mapValues(\.capability)
+        channel.modelLines = KimiWorkCatalog.merging(Array(catalog.keys), into: channel.modelLines)
+        busy = false
+        do { try await saveChannel(channel) }
+        catch {
+            if let previous { try? workCredentials.save(previous) }
+            throw error
+        }
+        kimiWorkStatus = "Work 已独立登录 · \(catalog.count) 个模型 · 无需 Kimi 客户端"
+        record("已连接 Kimi Work 独立登录")
     }
 
-    func kimiWorkModels(_ channel: Channel) async throws -> [String] {
-        try await kimiWorkCatalog(channel).0
+    func refreshKimiWorkModels(_ channel: Channel) async {
+        do {
+            let catalog = try await kimiWorkModelCatalog(channel)
+            guard var updated = settings.channels.first(where: { $0.id == channel.id }) else { return }
+            updated.workModels = catalog
+            updated.capabilities = catalog.mapValues(\.capability)
+            updated.modelLines = KimiWorkCatalog.merging(Array(catalog.keys), into: updated.modelLines)
+            try await saveChannel(updated)
+            kimiWorkStatus = "Work 目录已更新 · \(catalog.count) 个模型"
+        } catch { kimiWorkStatus = error.localizedDescription; report(error) }
     }
 
-    func kimiWorkCatalog(_ channel: Channel) async throws -> ([String], [String: ModelCapability]) {
-        let session = try KimiWorkSession.read(expectedAccountHash: channel.desktopAccountHash)
-        let data = try await kimiWorkRequest(path: KimiWorkSession.baseURL + "/models", token: session.apiKey, proxy: channel.proxyURL)
-        let names = ModelListRequest.names(in: data)
-        guard !names.isEmpty else { throw BridgeError.message("Work 网关未返回模型列表。") }
-        return (names, ModelListRequest.capabilities(in: data))
+    func kimiWorkModelCatalog(_ channel: Channel) async throws -> [String: KimiWorkModel] {
+        let session = try workCredentials.read(channel.desktopAccountHash)
+        let payload = try await workRequest(url: KimiWorkCatalog.endpoint, token: session.webToken, body: [:], proxy: channel.proxyURL)
+        return try KimiWorkCatalog.parse(payload)
     }
 
     func kimiWorkQuota(_ channel: Channel) async throws -> [String: Any] {
-        let session = try KimiWorkSession.read(expectedAccountHash: channel.desktopAccountHash)
-        return try await kimiWorkRequest(path: "https://www.kimi.com/apiv2/kimi.gateway.membership.v2.MembershipService/GetSubscriptionStats",
-                                         token: session.webToken, proxy: channel.proxyURL, membership: true)
+        let session = try workCredentials.read(channel.desktopAccountHash)
+        return try await workRequest(url: Self.workQuotaURL, token: session.webToken, body: [:], proxy: channel.proxyURL)
     }
 
-    private func kimiWorkRequest(path: String, token: String, proxy: String = "", membership: Bool = false) async throws -> [String: Any] {
-        let modelsURL = KimiWorkSession.baseURL + "/models"
-        let membershipURL = "https://www.kimi.com/apiv2/kimi.gateway.membership.v2.MembershipService/GetSubscriptionStats"
-        guard path == (membership ? membershipURL : modelsURL) else { throw BridgeError.message("无效的 Work 网关请求。") }
-        var headers = ["Authorization": "Bearer " + token, "User-Agent": "BridgeDock/1.3.2", "Accept": "application/json"]
-        var value: [String: Any] = ["method": membership ? "POST" : "GET", "url": path, "header": headers, "proxy_url": proxy]
-        if membership {
+    private func workRequest(url: String, token: String, body: [String: Any]? = nil, proxy: String = "") async throws -> [String: Any] {
+        guard [KimiWorkCatalog.endpoint, Self.workRefreshURL, Self.workKeyURL, Self.workQuotaURL, KimiWorkSession.baseURL + "/models"].contains(url) else {
+            throw BridgeError.message("无效的 Work 请求。")
+        }
+        var headers = ["Authorization": "Bearer " + token, "User-Agent": "BridgeDock", "Accept": "application/json"]
+        var value: [String: Any] = ["method": body == nil ? "GET" : "POST", "url": url, "proxy_url": proxy]
+        if let body {
             headers["Content-Type"] = "application/json"
             headers["Connect-Protocol-Version"] = "1"
-            value["header"] = headers
-            value["data"] = "{}"
+            value["data"] = String(decoding: try jsonData(body), as: UTF8.self)
         }
+        value["header"] = headers
         let result = try await object("/v8/management/requests/api-call", method: "POST", value: value)
-        guard let status = result["status_code"] as? Int, (200..<300).contains(status) else {
-            let status = result["status_code"] as? Int ?? 0
-            if status == 401 {
-                throw BridgeError.message(membership ? "会员额度登录已过期，请在 Kimi 桌面端重新登录；这不代表 Work 模型不可用。" : "Work 登录已过期，请在 Kimi 桌面端登录后重新连接。")
-            }
+        let status = result["status_code"] as? Int ?? 0
+        guard (200..<300).contains(status) else {
+            if status == 401 { throw BridgeError.message("Kimi Work 网页登录已过期，请在 BridgeDock 中重新网页登录；已保存的模型 Key 不受影响。") }
             throw BridgeError.message("Kimi Work 接口暂不可用（HTTP \(status)）。")
         }
         guard let text = result["body"] as? String, let data = text.data(using: .utf8), data.count <= 2_000_000,

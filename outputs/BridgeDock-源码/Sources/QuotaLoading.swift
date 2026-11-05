@@ -15,6 +15,7 @@ extension BridgeStore {
         quotaStates = quotaStates.filter { currentIDs.contains($0.key) }
         let pending = targets.filter { target in
             if let id, id != target.id { return false }
+            if !target.queryAvailable { return false }
             let state = quotaStates[target.id]
             if state?.loading == true && state?.fingerprint == target.fingerprint { return false }
             if state?.fingerprint != target.fingerprint { return true }
@@ -101,7 +102,15 @@ extension BridgeStore {
         guard !account.authIndex.isEmpty else { throw BridgeError.message("本地内核未返回这个账号的 auth_index，请刷新账号列表。") }
         var headers = ["Authorization": "Bearer $TOKEN$", "Accept": "application/json"]
         var snapshot: QuotaSnapshot
+        let provider: String
         switch account.provider.lowercased() {
+        case "anthropic": provider = "claude"
+        case "gpt", "chatgpt": provider = "codex"
+        case "grok": provider = "xai"
+        case "zcode-bigmodel", "zcode-zai", "zai": provider = "zcode"
+        default: provider = account.provider.lowercased()
+        }
+        switch provider {
         case "claude":
             headers["anthropic-beta"] = "oauth-2025-04-20"
             headers["User-Agent"] = "claude-cli/2.1.280 (external, cli)"
@@ -243,17 +252,7 @@ extension BridgeStore {
             return QuotaParser.kimiWork(try await kimiWorkQuota(channel))
         }
         guard let base = URLComponents(string: channel.baseURL), let host = base.host?.lowercased() else { throw BridgeError.message("请先配置有效的服务商地址。") }
-        var mode = channel.balanceMode
-        if mode == .auto {
-            switch host {
-            case "api.deepseek.com": mode = .deepseek
-            case "api.moonshot.cn", "api.moonshot.ai": mode = .moonshot
-            case "api.kimi.com", "api.kimi.ai": mode = .kimi
-            case "open.bigmodel.cn", "api.z.ai": mode = .zhipu
-            case "api.openai.com", "api.anthropic.com", "api.x.ai": mode = .unavailable
-            default: mode = .newAPI
-            }
-        }
+        let mode = channel.effectiveBalanceMode
         var parts = base
         parts.path = ""
         parts.query = nil
@@ -266,6 +265,7 @@ extension BridgeStore {
         case .kimi: path = "/coding/v1/usages"
         case .zhipu: path = "/api/monitor/usage/quota/limit"
         case .newAPI: path = "/api/usage/token/"
+        case .sub2api: path = "/v1/usage"
         case .custom:
             guard channel.balancePath.hasPrefix("/"), !channel.balancePath.hasPrefix("//"), !channel.balancePath.contains("#") else { throw BridgeError.message("请填写自定义余额接口路径。") }
             path = channel.balancePath

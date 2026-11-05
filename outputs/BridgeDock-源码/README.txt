@@ -1,16 +1,28 @@
-BridgeDock 桥接台 1.4.10
+BridgeDock 桥接台 1.4.20
 
 面向 Apple Silicon Mac 的本地模型反代桌面应用。
-界面使用 SwiftUI，内置 CLIProxyAPI 8.0.51 与 Kiro Plugin 0.1.1。
+界面使用 SwiftUI，内置 CLIProxyAPI 8.0.53、Kiro Plugin 0.1.1 与 kiro2cc-proxy 3.5.1。
 发行包包含运行所需内核，运行时无需安装 Node、Python、Docker 或 Homebrew。
 
 主要功能
 
 • 官方 API Key、Coding Plan Key、第三方中转站的新增、编辑、启停和删除。
-• Claude、Codex、Kimi 国内/国际、Grok Build / xAI 与 Kiro 的账号登录入口。
+• 接管中转站的“导入 CC Switch”按钮，自动识别并直接导入为 BD 渠道，后台入口保留在中转站。
+• Claude、Codex、Cursor、Kimi 国内/国际、Grok Build / xAI 与 Kiro 的账号登录入口。
+• Cursor 独立账号入口，支持账号 Key、邮箱----user_…::令牌、会话 Cookie 或 JWT。
+  会话先经 Cursor 官方接口验证身份再保存；可使用账号有权限的第三方模型。
+  同一账号重新粘贴新会话时更新令牌，保留前缀、备注、代理及停用状态。
+  会话到期后需要重新导入，不会把网页会话误当成能自动续期的 API Key。
+  Cursor 模型从账号的官方 GetUsableModels 目录读取，沿用 BD 的统一接口、
+  模型选择、渠道前缀和反代逻辑。此操作不登录或切换本机 Cursor 编辑器账号。
+  仅需 Max 模式才能使用的条目暂不开放。上游账单、权限和版本错误显示具体原因。
+  模型按钮打开原生参数菜单，显示 Cursor 官方提供且账号可用的参数组合。
+  Fast、Context、Effort 和 Thinking 按所选模型提供，映射到同账号对应的上游模型 ID。
+  其他渠道显示自身公布的思考档位和上下文预算；不可用的档位或组合会明确报错。
 • Grok Bot 通过 Cursor 网页授权后自动接入，账号 Key 也可分别接入两种通道。
 • Kiro 的 AWS Builder ID 与组织账号登录，Google / GitHub 凭据 JSON 导入。
-• Claude Code、ChatGPT / Codex、Kiro 本机登录一键导入，自动区分模型前缀。
+• 自动扫描 Claude Code、ChatGPT / Codex、Kiro 本机登录，一键导入并自动区分模型前缀。
+  首次接入后凭据复制到 BridgeDock 私有数据目录，由 BD 独立刷新和运行；删除源 Harness 或 Agent 不影响已接入账号。
 • OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 接口。
 • 流式输出与工具调用由反代内核进行协议转换。
 • /v1/images/generations 与 /v1/images/edits 统一改用 GPT 账号中版本最新的 gpt-image 模型，
@@ -28,12 +40,18 @@ BridgeDock 桥接台 1.4.10
 2. API 渠道中选择服务商，填写 Key，获取模型或手动填写模型 ID，再保存。
    模型列表每行一个，也可以写成“上游模型ID = 别名”。对外调用名为“渠道名称前四字/别名”。
 3. 订阅账号使用浏览器完成授权。密码、二次验证和授权由账号持有人操作。
-   已在官方客户端登录的 Claude、GPT / Codex、Kiro，可以直接点“连接本机登录”。
+   已在官方客户端登录的 Claude、GPT / Codex、Kiro，可以点击“自动读取本机登录”，一次扫描并接入所有已发现账号；也可以在服务商卡片中单独连接。
    Claude 读取 macOS 钥匙串或 .claude/.credentials.json；GPT 读取 .codex/auth.json；
    Kiro 读取 .aws/sso/cache/kiro-auth-token.json 及对应客户端注册文件。
+   Kimi Code、Grok、Cursor 和 ZCode 也提供“读取本机订阅”入口，会按各自客户端的
+   credentials/auth/config 文件（Kimi Code 登录 token 会按 config.toml 中的 OAuth 引用读取
+   ~/.kimi-code/credentials/，也支持 KIMI_CODE_HOME）读取；找不到或格式不匹配时
+   明确提示，不要求覆盖粘贴凭据。原始登录文件只读，不会被修改。
    首次连接分别分配 claude、gpt、kiro 前缀；被占用时自动添加序号。
    能识别为同一账号时，更新保留前缀、备注、代理与停用状态；无法确认身份时会明确提示。
-   原始客户端登录文件不会被修改。
+   原始客户端登录文件不会被修改。规范化后的令牌会复制到 BridgeDock 私有数据目录
+   的 accounts/，账号行显示“BD 已保存”；后续模型调用、额度刷新和凭据续期由 BD 自己完成，
+   即使删除原来的 Harness 或 Agent，已接入账号仍可继续运行。
    没有本机登录时会提示先登录，也可继续使用浏览器授权。
    通用 JSON 导入现在也接受 Claude Code 和 Codex 的原生凭据格式。
 4. 点击任意页面顶部的“模型”按钮，勾选需要开放给各工具的反代模型。
@@ -42,6 +60,9 @@ BridgeDock 桥接台 1.4.10
    或应用到选定的配置文件。应用前会保存原始文件备份。
 6. 工具需要重新启动会话以加载新配置。退出 BridgeDock 会停止反代。
    只关闭窗口时服务继续运行，点击菜单栏图标可以重新打开。
+7. 从“应用程序”或其他文件夹重复打开 BridgeDock，会显示正在运行的窗口。
+   同一数据目录仅允许一个实例运行，避免两个副本争抢端口或修改同一份配置。
+   应用意外退出后可直接重开，无需删除锁文件；其他程序占用端口时会显示具体端口。
 
 接入地址
 
@@ -77,6 +98,18 @@ Cursor 使用 Agents Window；Claude Code、Codex CLI、Kimi Code 在终端启�
 Kimi Code 首次启动会备份并应用其连接配置。Kiro 和 ZCode 按其客户端现有配置启动。
 对应应用或 CLI 需要已经安装。
 
+模型读取与 Fast 模式
+
+模型目录读取不再只认 `data[].id`：也接受 `modelId`、`model_id`、`slug`、`name`、
+`modelName` 及嵌套的 `result/models`、`items` 等常见结构，并把上下文、输出上限、
+思考档位和视觉能力统一成标准能力字段。Cursor 的非标准 slug 会按官方目录的
+family/variant 归并；目录接口字段变化时，会从已注册的真实 slug 推导基础模型、
+思考档位和 Fast 选项，调用仍使用原始上游 ID。
+
+同一渠道中带 `-highspeed`、`-high-speed`、`-fast` 或 `-高速` 后缀的 Kimi 等模型，
+在能力一致或服务商明确为 Kimi 时合并成一个基础模型，并在模型选择器显示“快速模式”。
+旧的高速模型 ID 仍可调用，会自动转换为基础模型加 Fast=true。
+
 余额与额度
 
 “余额与额度”按每个订阅账号、每个 API 渠道分别显示数据，支持搜索和手动刷新。
@@ -84,7 +117,9 @@ Kimi Code 首次启动会备份并应用其连接配置。Kiro 和 ZCode 按其�
 支持 Claude、Codex、Kimi Code、Grok、Kiro 的可获取额度，以及 DeepSeek、Moonshot、
 智谱 / Z.ai Coding Plan、New API 类中转站。各接口实际返回的额度、赠金、积分、
 现金余额、周期和到期时间分别展示。缺少的数据不记作 0，也不混合不同货币。
-API 渠道可以选择余额查询类型，或设置同一域名下的自定义余额接口路径。
+API 渠道可以选择余额查询类型，或设置同一域名下的自定义余额接口路径。未知中转站
+不会再自动猜测 New API；需要在渠道设置中明确选择查询类型。余额页会隐藏没有任何
+数值的空指标，保留上次成功结果并标记刷新失败，不再显示一堆“未提供数值”的空卡片。
 New API 的令牌额度与账户额度分开显示；站内额度不会擅自换算成货币。
 OpenAI、Anthropic、xAI 等普通 API Key 未提供可用余额接口时会说明原因。
 查询仅使用只读接口；Grok 额度不可用时不会额外调用模型来探测。
@@ -153,16 +188,54 @@ python3 Tests/proxy_test.py /tmp/bridgedock-test-data
 
 内核来源与校验
 
-CLIProxyAPI 8.0.51
-https://github.com/router-for-me/CLIProxyAPI/releases/tag/v8.0.51
+CLIProxyAPI 8.0.53
+https://github.com/router-for-me/CLIProxyAPI/releases/tag/v8.0.53
 原始 darwin_aarch64 压缩包 SHA-256
-fb8e2568e98e3304a1b892c4f70a4c154c661078ad87007e63cf7ba71b4ce168
+24a9116a9be459e9d1df5a9792eca17f04c0bb8505584d40c5b255565d07186f
 
 Kiro Plugin 0.1.1
 https://github.com/xiaokui-dev/cliproxyapi-kiro-plugin/releases/tag/v0.1.1
 原始 darwin_arm64 压缩包 SHA-256
 17a393f5f1a431069b26f40bfe7f371759c81795369c56c229d7e75c76238feb
 Vendor/kiro.dylib 由 Vendor/build-kiro.sh 从 v0.1.1 源码加 Vendor/KiroStreamChunks.patch 编译。
+插件现在只负责 Kiro 登录、账号列表、额度和凭据刷新；它会把上游回复收完再一次性发出，
+所以 Kiro 的模型请求改由 kiro2cc-proxy 处理。
+
+kiro2cc-proxy 3.5.1（Kiro 推理，逐段流式输出）
+https://github.com/TsinHzl/kiro2cc-proxy/tree/e5387453c10a87e350fbe2d7c6505a1b128f5445
+源码压缩包 SHA-256
+b2e35fd35b9daeaffaa290298d4d64c18cb00387631868eee4745c9218200ec9
+Vendor/kiro2cc-proxy 由 Vendor/build-kiro2cc.sh 编译，构建时运行上游测试；
+内置管理网页用空页面替代，BridgeDock 不使用它。
+运行方式：
+• 内核启动后，BridgeDock 把 accounts/ 中的 Kiro 账号转换成 kiro-runtime/credentials.json，
+  在 127.0.0.1:18421 启动 kiro2cc-proxy。每个模型前缀单独一个随机内部 Key，只绑定该前缀的账号。
+• 启用两个或更多 Kiro 账号时，额外生成一个绑定全部账号的共享 Key，kiro2cc 以 balanced 模式运行：
+  所有账号同时在线、各自刷新令牌互不覆盖；新会话依次分给 A → B → A …，同一会话按
+  agentContinuationId 留在原账号；某个账号失效时自动跳过，恢复后重新加入。
+  此时客户端选 kiro/… 还是 kiro-2/… 都走共享池。账号文件里写 "pool": false 可让它退出共享池，
+  只通过自己的前缀调用。
+• 网关把 owned_by 为 kiro 的模型的 Chat、Messages、Responses 请求转给它；其他接口和
+  未就绪时仍走内核里的 Kiro 插件。连不上 kiro2cc（例如崩溃后重启的几秒）且还没向客户端
+  回任何内容时，网关把这条请求改发给内核，只是变回整段返回，不会报错。
+• 账号增删、启停、调优先级、重新登录都通过 kiro2cc 管理接口热更新，不重启进程，其他账号上
+  正在输出的流不受影响；新凭据和 Key 先建好、网关切过去后才删除旧的。只有上游代理变化，
+  或管理接口无法表达的改动（例如去掉 clientId），才整进程重启。
+• kiro2cc 自己退出时自动重启，间隔 1、2、4 … 秒，最长 60 秒；稳定运行 5 分钟后重新从 1 秒算。
+• 各账号的额度（订阅等级）启动时同时查询，之后每 30 分钟刷新一次。
+• kiro2cc 刷新的令牌每分钟及停止前写回 accounts/，读写在后台队列上进行，不占主线程；
+  写回前会再读一次文件，界面里刚重新登录的账号不会被旧令牌覆盖。credentials.json 保持 0600。
+• kiro2cc.log 在 info 级别只记请求元数据（会话 id、哈希、token 数），不含令牌和提示词。
+• HOME 指向 kiro-runtime/，不会读取用户的 ~/.aws 缓存。
+测试：
+xcrun swiftc -swift-version 5 Sources/Models.swift Sources/SubscriptionAccounts.swift Sources/ModelPublishing.swift Sources/ModelGateway.swift Sources/KiroRuntime.swift Tests/KiroRuntimeTests.swift -o /tmp/bridgedock-kiro-runtime-tests
+/tmp/bridgedock-kiro-runtime-tests
+xcrun swiftc -swift-version 5 Sources/Models.swift Sources/SubscriptionAccounts.swift Sources/ModelPublishing.swift Sources/ModelDiscovery.swift Sources/ModelGateway.swift Sources/KiroRuntime.swift Tests/ModelGatewayTests.swift -o /tmp/bridgedock-gateway-tests
+python3 Tests/model_gateway_test.py /tmp/bridgedock-gateway-tests
+压力测试（走 BD 网关，和 Cursor 同一条路径；需要 BridgeDock 正在运行且启用两个以上 Kiro 账号）：
+python3 -I Tests/kiro_pool_stress.py [smoke rotation sticky burst hot crash refresh soak]
+  hot 阶段会临时禁用一个账号再恢复；crash 阶段会 kill -9 kiro2cc 验证自动重启。
+  BD_STRESS_SOAK=秒数、BD_STRESS_WORKERS=并发数 控制 soak 阶段；结果写到 kiro-stress-result.json。
 补丁把流式输出的 event 行和 data 行拆成两个分片：内核逐片转换成 OpenAI 格式时，
 只识别以 data: 开头的分片，原版在 /v1/chat/completions 流式请求上会全部丢弃，
 报 empty_stream: upstream stream closed before first payload。
@@ -257,18 +330,33 @@ Kimi Code会员订阅与Moonshot开放平台分别提供国内/国际预设；�
 预设来源链接在编辑页显示，便于核对。
 
 
-Kimi Work 通道（1.3.2）
-在本机Kimi桌面端登录Work后，在订阅页点击“连接本机Work”。
-通道使用独立的agent-gw.kimi.com/coding/v1网关，模型从Work实时查询。
-与Kimi Code订阅Key渠道分开；Work消耗会员月度共享额度，不是无限额度。
-账号绑定只保存用户ID摘要；每12秒检查桌面凭据变化，并更新内核私有配置。
-state.json不保存Work/Web令牌；内核运行配置按原安全机制存放在0700目录、0600文件内。
-不会修改Kimi桌面配置或消费其refresh token；由桌面端负责登录续期。
-切换桌面账号时暂停旧通道，需要明确点击重新连接。
-余额页仅显示会员共享池；登录过期或接口失败保留未知，不将其写成0。
-此接入参考社区实现和本机官方客户端，属于未公开的桌面接口，版本变化时可能需重新适配。
-参考 https://github.com/keenlin/magpie-plugins/tree/3e966bb4b5f21b9b3d1cbe6c4d15cca8fbf32fe9/packages/kimi-work
-额度规则 https://www.kimi.com/help/membership/membership-update-rules
+Kimi Work 独立通道（2026-11-04）
+在订阅页 Kimi Work 中点击“网页登录”，在 BridgeDock 内的官方网页完成登录。
+BridgeDock 独立保存会话与 Work Key，并为自己的会话续期；无需安装或运行 Kimi 客户端。
+旧版桌面绑定在首次启动时迁移一次；不再轮询桌面文件，也不消费桌面端的 refresh token。
+迁移时保留原账号、前缀、模型别名和启停状态。旧网页令牌过期时，模型 Key 仍可独立反代，
+但刷新模型目录和查询额度需要点击“重新网页登录”。凭据保存在数据目录 kimi-work/，
+目录权限 0700、文件权限 0600；state.json 仅保存账号摘要与模型能力。
+
+模型改从官方 DescribeKimiWorkConfig 获取，包含 K3.1 Pro（k3d1-agent）及可用速度选项；
+不再将仍只返回 K3/K2.8 的旧 /coding/v1/models 列表当成完整 Work 目录。
+旧连接迁移时可一次性导入同账号的官方目录缓存；在线刷新失败会保留已保存目录。
+新发现模型追加到可选目录，已有别名保留；固定发布列表仍需在“模型”中勾选新模型。
+Fast 按上游 speedOptions 显示，在 Cursor 模型参数菜单切换，也可在 API 请求中传入
+X-Kimi-Model-Speed: fast（普通速度为 standard）。只有账号目录明确支持的速度才允许使用。
+上下文由 X-Kimi-Context-Length 传递，默认 262144，可选 1000000 以上游权限为准。
+Work 的 low/high/max 思考档位完整传入反代内核，避免 max 被降为 high。
+三种协议（Chat Completions、Responses、Messages）均支持上述参数与流式输出。
+Fast、超长上下文和高思考强度可能消耗更多会员额度；Work 与 Kimi Code 的计费通道分开。
+
+回归测试：
+xcrun swiftc -swift-version 5 Sources/Models.swift Sources/SubscriptionAccounts.swift Sources/KimiWork.swift Sources/KimiWorkCatalog.swift Sources/KimiWorkRouting.swift Sources/ModelPublishing.swift Sources/ModelGateway.swift Tests/KimiWorkIndependentTests.swift -o /tmp/bridgedock-work-tests
+/tmp/bridgedock-work-tests
+python3 Tests/kimi_work_proxy_test.py /tmp/bridgedock-work-tests Vendor/cli-proxy-api
+
+协议参考：本机官方 Kimi 3.2.24 客户端（登录、DescribeKimiWorkConfig、Work Key 与速度请求头）
+模型发布 https://www.kimi.com/en/blog/kimi-k3-1-pro
+旧版迁移参考 https://github.com/keenlin/magpie-plugins/tree/3e966bb4b5f21b9b3d1cbe6c4d15cca8fbf32fe9/packages/kimi-work
 
 
 模型发布与 Cursor 参数（1.4.0）
@@ -395,3 +483,44 @@ loginDeepControl 页面、随机 proof key 和 redirectTarget=sand。
 
 验证：订阅凭据单元测试、隔离内核双通道模型目录测试和完整应用构建。
 测试仅使用模拟 Key，并通过沙盒阻断外网，不消耗真实模型额度。
+
+
+模型选择器修复（1.4.18）
+
+Cursor 的上下文、思考强度、快速模式与档位名称统一使用中文。
+Claude 模型版本号的点号和短横线写法合并到同一个入口，供应商菜单可分别选择 Claude 与 Kiro；真实调用 ID 和原有发布选择保持不变。
+普通 API 渠道恢复较小的本地上下文预算，例如 1M 窗口可选 200K、256K、512K、1M。
+Cursor / Work 继续只提供账号实际支持的档位与组合，不跨供应商借用参数。
+旧的 Kiro 点号模型名称仍可调用，客户端刷新会保留原供应商选择。
+
+
+中转站一键导入（1.4.20）
+
+Sub2API、New API 等中转站的令牌页有“导入 CC Switch”按钮，点击后浏览器打开
+ccswitch://v1/import?resource=provider&app=…&endpoint=…&apiKey=… 链接。
+BridgeDock 登记并接管这个链接：点击按钮后自动识别，直接存成一条 API 渠道，
+请求仍经 BridgeDock 自带的本地反代内核转发，不改用 CC Switch 或其他程序。
+协议按所选客户端识别（Claude Code → Anthropic Messages，Codex → OpenAI Responses，
+Grok Build → xAI，OpenCode 等 → Chat Completions）。链接不带模型时自动查询中转站的模型列表；
+已手动挑选过开放模型时，新渠道的模型一并开放。导入结果显示在“账号与渠道”页顶部。
+只有查不到模型、本地服务没启动等无法自动完成的情况，才打开编辑器补全。
+渠道前缀取站点域名（例如 api.aiportx.com → aiportx），中文站名不影响路由。
+同一站点、同一 Key、同一协议再次导入时更新原渠道，不会重复添加。
+
+渠道仍归中转站管理：导入时记住站点名和后台地址（Sub2API 为 /keys 令牌页，
+其他站点为站点首页，也可在渠道设置里修改）。渠道行显示“中转站 · 站名”，
+右侧“中转站后台”按钮直接打开该页面，充值、换 Key、查看明细和删除令牌都在那里操作。
+链接带的余额脚本指向 /v1/usage 时，余额查询使用新的“Sub2API 令牌、订阅与钱包额度”，
+显示钱包余额、令牌总额度、5 小时 / 每日 / 7 天限额、订阅周期用量、到期时间和今日消费。
+
+设置与诊断页的“中转站一键导入”开关默认开启，关闭后忽略收到的导入链接。
+只支持服务商链接，Gemini 原生协议、MCP、提示词和技能链接会提示原因，不会导入。
+
+xcrun swiftc -swift-version 5 Sources/Models.swift Sources/SubscriptionAccounts.swift Sources/Quotas.swift Sources/CCSwitchLink.swift Tests/CCSwitchLinkTests.swift -o /tmp/bridgedock-ccswitch-tests && /tmp/bridgedock-ccswitch-tests
+
+
+模型系列分组（1.4.19）
+
+Cursor 模型列表按 GPT、Claude、Gemini、Grok、Kimi、GLM 等模型系列分组。
+同系列的不同版本与子型号连续排列，不受默认供应商、渠道名称或目录返回顺序影响。
+供应商仍在模型参数中单独选择；搜索同时匹配模型系列和该模型的所有供应商。

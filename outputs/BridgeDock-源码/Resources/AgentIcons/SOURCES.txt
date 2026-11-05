@@ -5,6 +5,8 @@ claude.png: /Applications/Claude.app, macOS application icon; shared by Claude a
 codex.png: /Applications/ChatGPT.app/Contents/Resources/icon-codex-light.png (Codex artwork, not the ChatGPT icon).
 kimi.png: /Applications/Kimi.app, macOS application icon.
 kiro.png: /Applications/Kiro CLI.app, macOS application icon.
-zcode.png: https://zcode.z.ai/favicon-192x192.png?v=20260707-transparent
+zcode.png: https://zcode.z.ai/favicon-192x192.png?v=20260707-transparent; also used for Zhipu GLM.
+grok.png: /Applications/Grok Bot.app, macOS application icon.
+deepseek.png: https://www.deepseek.com/favicon.ico (225-pixel original, scaled to 128 pixels).
 
 Application icons exported with NSWorkspace as 128-pixel PNGs. Original artwork is retained.

@@ -116,6 +116,10 @@
         {
           "find": "computeAvailableDefaultModels(){",
           "replace": "computeAvailableDefaultModels(){if(globalThis.__bridgeDockLocal){this.reactiveStorageService.availableModelsCatalogRevision();return(this.reactiveStorageService.applicationUserPersistentStorage.availableDefaultModels2??[]).map(Osp);}"
+        },
+        {
+          "find": "function d3p({active:e,compactModelIds:t}){",
+          "replace": "function d3p({active:e,compactModelIds:t}){e=globalThis.__bridgeDockParameterMenu(e);"
         }
       ]
     },
@@ -246,6 +250,10 @@
         {
           "find": "computeAvailableDefaultModels(){",
           "replace": "computeAvailableDefaultModels(){if(globalThis.__bridgeDockLocal){this.reactiveStorageService.availableModelsCatalogRevision();return(this.reactiveStorageService.applicationUserPersistentStorage.availableDefaultModels2??[]).map(Yug);}"
+        },
+        {
+          "find": "function $tv({active:t,compactModelIds:e}){",
+          "replace": "function $tv({active:t,compactModelIds:e}){t=globalThis.__bridgeDockParameterMenu(t);"
         }
       ]
     },
@@ -259,7 +267,27 @@
         },
         {
           "find": "async function Ize(e){",
-          "replace": "async function Ize(e){if(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"0\")e={...e,modelParameters:e.modelParameters?.filter(p=>![\"context\",\"reasoning\",\"effort\",\"thought_level\"].includes(p.id))};"
+          "replace": "async function Ize(e){if(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"0\")e={...e,modelParameters:e.modelParameters?.filter(p=>![\"context\",\"reasoning\",\"effort\",\"thought_level\",\"fast\",\"thinking\",\"provider\"].includes(p.id))};if(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"1\")e={...e,customHeaders:{...e.customHeaders,\"X-BridgeDock-Parameters\":encodeURIComponent(JSON.stringify(e.modelParameters??[]))}};",
+          "previousReplacements": [
+            "async function Ize(e){if(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"0\")e={...e,modelParameters:e.modelParameters?.filter(p=>![\"context\",\"reasoning\",\"effort\",\"thought_level\"].includes(p.id))};",
+            "async function Ize(e){if(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"0\")e={...e,modelParameters:e.modelParameters?.filter(p=>![\"context\",\"reasoning\",\"effort\",\"thought_level\",\"fast\",\"thinking\"].includes(p.id))};if(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"1\")e={...e,customHeaders:{...e.customHeaders,\"X-BridgeDock-Parameters\":encodeURIComponent(JSON.stringify(e.modelParameters??[]))}};"
+          ]
+        },
+        {
+          "find": "do not start with a verb; Title Case; no punctuation, quotes, or trailing period.\\nExamples:\\n",
+          "replace": "do not start with a verb; write the name in the same language as the user's message (a Chinese message gets a Chinese name) and use Title Case only for English; no punctuation, quotes, or trailing period.\\nExamples:\\nMessage: 帮我看看登录页为什么一直报错 -> <name>登录页报错排查</name>\\n"
+        },
+        {
+          "find": "systemPromptGenerator:rWe(e,n,s),toolsGenerator:",
+          "replace": "systemPromptGenerator:((g,l)=>{if(void 0===e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"])return g;const w=(a,b)=>{const v=g(a,b);return\"string\"==typeof v&&!v.includes(l)?v+l:v};w.__bridgeDockLanguage=l;return w})(rWe(e,n,s),\"\\n\\n<language_preference>\\n无论当前使用哪个模型，所有面向用户的输出都尽可能使用简体中文，包括回复、解释、进度说明、计划、总结、提问、思考摘要、代码注释、提交信息和生成的文档。代码、命令、文件路径、标识符、API 名称、日志和报错原文保持原样，不要翻译。用户明确要求使用其他语言时，以用户要求为准。\\n</language_preference>\"),toolsGenerator:"
+        },
+        {
+          "find": "i=t.systemPromptOverride?t.systemPromptOverride(o,s,{subagentInstanceId:n,baseSystemPromptGenerator:e.systemPromptGenerator}):e.systemPromptGenerator(o,s),a=t.systemReminder;",
+          "replace": "i=((v,l)=>l&&\"string\"==typeof v&&!v.includes(l)?v+l:v)(t.systemPromptOverride?t.systemPromptOverride(o,s,{subagentInstanceId:n,baseSystemPromptGenerator:e.systemPromptGenerator}):e.systemPromptGenerator(o,s),e.systemPromptGenerator.__bridgeDockLanguage),a=t.systemReminder;"
+        },
+        {
+          "find": "function exe(e){const t=e.trim();return t.length>0?t.split(/\\s+/).length:0}",
+          "replace": "function exe(e){const t=e.trim();return t.length>0?(t.match(/[\\u3040-\\u30ff\\u3400-\\u9fff\\uf900-\\ufaff\\uac00-\\ud7af]|[^\\s\\u3040-\\u30ff\\u3400-\\u9fff\\uf900-\\ufaff\\uac00-\\ud7af]+/g)||[]).length:0}"
         }
       ]
     },
@@ -273,7 +301,27 @@
         },
         {
           "find": "async function j8e(e){",
-          "replace": "async function j8e(e){if(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"0\")e={...e,modelParameters:e.modelParameters?.filter(p=>![\"context\",\"reasoning\",\"effort\",\"thought_level\"].includes(p.id))};"
+          "replace": "async function j8e(e){if(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"0\")e={...e,modelParameters:e.modelParameters?.filter(p=>![\"context\",\"reasoning\",\"effort\",\"thought_level\",\"fast\",\"thinking\",\"provider\"].includes(p.id))};if(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"1\")e={...e,customHeaders:{...e.customHeaders,\"X-BridgeDock-Parameters\":encodeURIComponent(JSON.stringify(e.modelParameters??[]))}};",
+          "previousReplacements": [
+            "async function j8e(e){if(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"0\")e={...e,modelParameters:e.modelParameters?.filter(p=>![\"context\",\"reasoning\",\"effort\",\"thought_level\"].includes(p.id))};",
+            "async function j8e(e){if(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"0\")e={...e,modelParameters:e.modelParameters?.filter(p=>![\"context\",\"reasoning\",\"effort\",\"thought_level\",\"fast\",\"thinking\"].includes(p.id))};if(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"1\")e={...e,customHeaders:{...e.customHeaders,\"X-BridgeDock-Parameters\":encodeURIComponent(JSON.stringify(e.modelParameters??[]))}};"
+          ]
+        },
+        {
+          "find": "do not start with a verb; Title Case; no punctuation, quotes, or trailing period.\\nExamples:\\n",
+          "replace": "do not start with a verb; write the name in the same language as the user's message (a Chinese message gets a Chinese name) and use Title Case only for English; no punctuation, quotes, or trailing period.\\nExamples:\\nMessage: 帮我看看登录页为什么一直报错 -> <name>登录页报错排查</name>\\n"
+        },
+        {
+          "find": "systemPromptGenerator:w7e(e,r,o),toolsGenerator:",
+          "replace": "systemPromptGenerator:((g,l)=>{if(void 0===e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"])return g;const w=(a,b)=>{const v=g(a,b);return\"string\"==typeof v&&!v.includes(l)?v+l:v};w.__bridgeDockLanguage=l;return w})(w7e(e,r,o),\"\\n\\n<language_preference>\\n无论当前使用哪个模型，所有面向用户的输出都尽可能使用简体中文，包括回复、解释、进度说明、计划、总结、提问、思考摘要、代码注释、提交信息和生成的文档。代码、命令、文件路径、标识符、API 名称、日志和报错原文保持原样，不要翻译。用户明确要求使用其他语言时，以用户要求为准。\\n</language_preference>\"),toolsGenerator:"
+        },
+        {
+          "find": "i=t.systemPromptOverride?t.systemPromptOverride(s,o,{subagentInstanceId:r,baseSystemPromptGenerator:e.systemPromptGenerator}):e.systemPromptGenerator(s,o),a=t.systemReminder;",
+          "replace": "i=((v,l)=>l&&\"string\"==typeof v&&!v.includes(l)?v+l:v)(t.systemPromptOverride?t.systemPromptOverride(s,o,{subagentInstanceId:r,baseSystemPromptGenerator:e.systemPromptGenerator}):e.systemPromptGenerator(s,o),e.systemPromptGenerator.__bridgeDockLanguage),a=t.systemReminder;"
+        },
+        {
+          "find": "function uLe(e){const t=e.trim();return t.length>0?t.split(/\\s+/).length:0}",
+          "replace": "function uLe(e){const t=e.trim();return t.length>0?(t.match(/[\\u3040-\\u30ff\\u3400-\\u9fff\\uf900-\\ufaff\\uac00-\\ud7af]|[^\\s\\u3040-\\u30ff\\u3400-\\u9fff\\uf900-\\ufaff\\uac00-\\ud7af]+/g)||[]).length:0}"
         }
       ]
     }

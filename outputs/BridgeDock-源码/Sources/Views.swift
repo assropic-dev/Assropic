@@ -2,18 +2,17 @@ import SwiftUI
 import AppKit
 
 enum Destination: String, CaseIterable, Identifiable {
-    case overview = "总览", accounts = "订阅账号", channels = "API 渠道", models = "模型与测试", clients = "工具接入", balances = "余额与额度", settings = "设置与诊断"
+    case overview = "总览", accounts = "账号与渠道", models = "模型与测试", clients = "工具接入", balances = "余额与额度", settings = "设置与诊断"
     var id: String { rawValue }
     static let sections: [(title: String, items: [Destination])] = [
         ("", [.overview]),
-        ("接入来源", [.accounts, .channels]),
+        ("接入来源", [.accounts]),
         ("使用", [.models, .clients, .balances]),
         ("系统", [.settings])
     ]
     var symbol: String {
         switch self {
         case .overview: return "square.grid.2x2"
-        case .channels: return "point.3.connected.trianglepath.dotted"
         case .accounts: return "person.crop.rectangle.stack"
         case .balances: return "chart.bar.doc.horizontal"
         case .models: return "cube.transparent"
@@ -24,34 +23,12 @@ enum Destination: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .overview: return "在这台 Mac 上，统一管理模型与编程工具的连接。"
-        case .channels: return "添加官方 API、Coding Plan 或第三方中转站。"
-        case .accounts: return "通过浏览器授权接入订阅账号，凭据保存在本机。"
+        case .accounts: return "按服务商登录订阅账号或填写 API Key，凭据保存在本机。"
         case .balances: return "逐账号查看余额、周期额度、用量和重置时间。"
         case .models: return "检查模型联通程度、路由标识与实际回答表现。"
         case .clients: return "选择模型，再将本地接口接入你的编程工具。"
         case .settings: return "管理本地端口、出站代理与配置备份。"
         }
-    }
-}
-
-struct Card<Content: View>: View {
-    @ViewBuilder var content: Content
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) { content }.padding(28).frame(maxWidth: .infinity, alignment: .leading)
-            .background(panel, in: RoundedRectangle(cornerRadius: 18))
-            .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(hairline.opacity(0.75), lineWidth: 1))
-            .shadow(color: ink.opacity(0.025), radius: 8, x: 0, y: 3)
-    }
-}
-
-struct Pill: View {
-    let text: String
-    var active = true
-    var body: some View {
-        Text(text).font(.system(size: 11, weight: .medium))
-            .foregroundStyle(active ? accent : mutedInk)
-            .padding(.horizontal, 10).padding(.vertical, 5)
-            .background((active ? accent : Color.gray).opacity(0.1), in: Capsule())
     }
 }
 
@@ -80,7 +57,6 @@ struct ContentView: View {
                     Group {
                         switch selected {
                         case .overview: OverviewView(selected: $selected)
-                        case .channels: ChannelsView()
                         case .accounts: AccountsView()
                         case .balances: BalancesView()
                         case .models: ModelsView()
@@ -96,7 +72,14 @@ struct ContentView: View {
             .alert("操作未完成", isPresented: Binding(get: { store.error != nil }, set: { if !$0 { store.error = nil } })) {
                 Button("知道了") { store.error = nil }
             } message: { Text(store.error ?? "") }
+            .sheet(item: $store.pendingImport) { item in
+                ChannelEditor(channel: item.channel, importing: item).environmentObject(store)
+            }
+            .onChange(of: store.pendingImport?.id) { _, id in if id != nil { selected = .accounts } }
+            .onChange(of: store.importNotice) { _, notice in if !notice.isEmpty { selected = .accounts } }
+            .onAppear { store.openMainWindow = { [openWindow] in openWindow(id: "main") } }
     }
+    @Environment(\.openWindow) private var openWindow
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -149,8 +132,7 @@ struct ContentView: View {
     private func badge(_ item: Destination) -> Int? {
         let count: Int
         switch item {
-        case .accounts: count = store.accounts.count + store.settings.channels.filter(\.isKimiWork).count
-        case .channels: count = store.settings.channels.filter { !$0.isKimiWork }.count
+        case .accounts: count = store.accounts.count + store.settings.channels.count
         case .models: count = store.models.count
         default: return nil
         }
@@ -235,7 +217,7 @@ struct OverviewView: View {
             VStack(alignment: .leading, spacing: 28) {
                 Text("你的连接").font(.system(size: 13, weight: .medium)).foregroundStyle(mutedInk)
                 HStack(spacing: 20) {
-                    statistic("API 渠道", String(store.settings.channels.filter { $0.enabled && !$0.isKimiWork }.count), "network", .channels)
+                    statistic("API 渠道", String(store.settings.channels.filter { $0.enabled && !$0.isKimiWork }.count), "network", .accounts)
                     statistic("订阅账号", String(store.accounts.count + store.settings.channels.filter(\.isKimiWork).count), "person.crop.circle", .accounts)
                     statistic("可用模型", String(store.models.count), "cube", .models)
                 }
@@ -269,95 +251,11 @@ struct OverviewView: View {
     }
 }
 
-struct ChannelsView: View {
-    @EnvironmentObject var store: BridgeStore
-    @State private var editing: Channel?
-    @State private var deleting: Channel?
-    private var channels: [Channel] { store.settings.channels.filter { !$0.isKimiWork } }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 28) {
-            Card {
-                VStack(alignment: .leading, spacing: 0) {
-                    HStack {
-                        Text("已添加渠道 · \(channels.count)").font(.system(size: 15, weight: .semibold))
-                        Spacer()
-                        if store.settings.channels.contains(where: \.isKimiWork) {
-                            Text("Kimi Work 在“订阅账号”中管理").font(.system(size: 11)).foregroundStyle(mutedInk)
-                        }
-                    }.padding(.bottom, 8)
-                    if channels.isEmpty {
-                        Text("还没有添加 API 渠道。从下方选择服务商，填入 Key 即可。每个渠道都有独立的地址、密钥、前缀和模型别名。")
-                            .font(.system(size: 12)).foregroundStyle(mutedInk).padding(.vertical, 18)
-                    }
-                    ForEach(channels) { channel in
-                        Divider().opacity(0.3)
-                        channelRow(channel)
-                    }
-                }
-            }
-            VStack(alignment: .leading, spacing: 14) {
-                Text("添加渠道").font(.system(size: 16, weight: .semibold))
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 200), spacing: 12)], spacing: 12) {
-                    ForEach(Preset.all) { preset in
-                        Button {
-                            editing = preset.makeChannel(existing: store.settings.channels, accounts: store.accounts)
-                        } label: {
-                            HStack {
-                                Text(preset.title).font(.system(size: 12)).lineLimit(1)
-                                Spacer()
-                                Image(systemName: "plus").foregroundStyle(accent)
-                            }.padding(.horizontal, 12).padding(.vertical, 11)
-                                .background(panel, in: RoundedRectangle(cornerRadius: 9))
-                                .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(hairline.opacity(0.7)))
-                                .contentShape(Rectangle())
-                        }.buttonStyle(.plain)
-                    }
-                }
-            }
-        }.sheet(item: $editing) { channel in ChannelEditor(channel: channel) }
-            .confirmationDialog("删除这个 API 渠道？", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })) {
-                Button("删除渠道", role: .destructive) { if let value = deleting { Task { await store.deleteChannel(value) } }; deleting = nil }
-            }
-    }
-
-    private func channelRow(_ channel: Channel) -> some View {
-        HStack(alignment: .top, spacing: 14) {
-            Circle().fill(channel.enabled ? healthy : mutedInk.opacity(0.5)).frame(width: 7, height: 7).padding(.top, 6)
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 8) {
-                    Text(channel.name).font(.system(size: 13, weight: .medium))
-                    if let name = store.publicPrefix(source: "channel:" + channel.id) {
-                        Text(name + "/…").font(.system(size: 11, design: .monospaced)).foregroundStyle(accent)
-                            .help("对外调用名前缀；内部路由前缀为 " + channel.prefix)
-                    }
-                }
-                Text("\(channel.wire.title) · \(channel.models.count) 个模型" + (channel.enabled ? "" : " · 已停用"))
-                    .font(.system(size: 11)).foregroundStyle(mutedInk)
-                Text(channel.baseURL).font(.system(size: 10, design: .monospaced)).foregroundStyle(mutedInk)
-                    .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
-                QuotaSummaryView(target: QuotaTarget(channel: channel))
-            }
-            Spacer(minLength: 10)
-            Button("编辑") { editing = channel }
-            Menu {
-                Button(channel.enabled ? "停用渠道" : "启用渠道") {
-                    var value = channel; value.enabled.toggle()
-                    Task { do { try await store.saveChannel(value) } catch { store.report(error) } }
-                }
-                Divider()
-                Button("删除渠道…", role: .destructive) { deleting = channel }
-            } label: { Image(systemName: "ellipsis") }
-                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                .disabled(store.busy).accessibilityLabel("更多操作：" + channel.name)
-        }.padding(.vertical, 8)
-    }
-}
-
 struct ChannelEditor: View {
     @EnvironmentObject var store: BridgeStore
     @Environment(\.dismiss) private var dismiss
     @State var channel: Channel
+    var importing: ChannelImport? = nil
     @State private var fetching = false
     @State private var saving = false
     @State private var localError = ""
@@ -382,10 +280,14 @@ struct ChannelEditor: View {
     }
     private var canAutomaticallyDiscover: Bool {
         if channel.isKimiWork { return true }
-        guard let preset, preset.id != "relay",
-              let expected = URL(string: preset.url), let actual = URL(string: channel.baseURL),
-              expected.host?.lowercased() == actual.host?.lowercased(),
-              actual.scheme?.lowercased() == "https" else { return false }
+        if let importing, channel.apiKey == importing.channel.apiKey, channel.baseURL == importing.channel.baseURL { return true }
+        // Custom relays are allowed to advertise a standard or provider-shaped
+        // model endpoint too.  Once a valid URL and key exist, query it
+        // automatically; the parser keeps the user's list when the endpoint
+        // is unavailable or returns an unfamiliar schema.
+        guard let actual = URL(string: channel.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)),
+              ["http", "https"].contains(actual.scheme?.lowercased() ?? ""), actual.host != nil,
+              actual.user == nil, actual.password == nil, actual.query == nil, actual.fragment == nil else { return false }
         return true
     }
     private var modelText: Binding<String> {
@@ -399,16 +301,27 @@ struct ChannelEditor: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 28) {
             HStack {
-                Text("配置 API 渠道").font(.system(size: 24, weight: .regular, design: .serif))
+                Text(importing == nil ? "配置 API 渠道" : "从中转站导入").font(.system(size: 24, weight: .regular, design: .serif))
                 Spacer()
                 Button("取消") { cancelLookup(); dismiss() }.disabled(saving)
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
+                    if let importing {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text((importing.existingName == nil ? "新渠道 · " : "更新已有渠道“\(importing.existingName!)” · ") + importing.site)
+                                .font(.system(size: 13, weight: .semibold))
+                            Text("自动导入没有完成，通常是中转站没有返回模型列表，或本地服务尚未启动。补全模型后保存即可；充值、换 Key、用量明细和删除令牌仍在中转站后台操作。")
+                                .font(.system(size: 11)).foregroundStyle(mutedInk).lineSpacing(3)
+                            if let page = URL(string: channel.manageURL), !channel.manageURL.isEmpty {
+                                Link("打开中转站后台", destination: page).font(.system(size: 11))
+                            }
+                        }.padding(14).frame(maxWidth: .infinity, alignment: .leading).background(insetSurface, in: RoundedRectangle(cornerRadius: 10))
+                    }
                     if channel.isKimiWork {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Kimi Work · 本机桌面登录").font(.system(size: 13, weight: .semibold))
-                            Text("本机 Work 凭据由 Kimi 桌面端维护，无需填写 API Key。此渠道使用 Work 独立网关和会员月度共享额度；Code 的 5 小时 / 周限制不作为该通道的额度，但仍受上游实际限制。")
+                            Text("Kimi Work · 独立登录").font(.system(size: 13, weight: .semibold))
+                            Text("登录凭据由 BridgeDock 独立保存，无需安装或运行 Kimi 客户端。此渠道使用 Work 网关和会员共享额度；Fast 与超长上下文可能消耗更多额度。")
                                 .font(.system(size: 11)).foregroundStyle(mutedInk).lineSpacing(3)
                             Link("GitHub · Kimi Work 适配", destination: URL(string: "https://github.com/keenlin/magpie-plugins/tree/main/packages/kimi-work")!).font(.system(size: 11))
                         }.padding(14).frame(maxWidth: .infinity, alignment: .leading).background(insetSurface, in: RoundedRectangle(cornerRadius: 10))
@@ -440,7 +353,7 @@ struct ChannelEditor: View {
                         if channel.isKimiWork {
                             GridRow {
                                 Text("登录凭据")
-                                Text("由本机 Kimi 桌面端维护").font(.system(size: 12)).foregroundStyle(mutedInk).frame(height: 32)
+                                Text("由 BridgeDock 独立保存").font(.system(size: 12)).foregroundStyle(mutedInk).frame(height: 32)
                             }
                         } else {
                             GridRow {
@@ -458,6 +371,12 @@ struct ChannelEditor: View {
                         GridRow {
                             Text("渠道前缀")
                             TextField("渠道前缀", text: $channel.prefix).frame(height: 32)
+                        }
+                        if !channel.isKimiWork && (Preset.matching(channel) == nil || !channel.manageURL.isEmpty) {
+                            GridRow {
+                                Text("中转站后台（可选）")
+                                TextField("中转站后台（可选）", text: $channel.manageURL, prompt: Text("https://relay.example/keys，渠道菜单可直接打开")).frame(height: 32)
+                            }
                         }
                         GridRow {
                             Text("独立网络代理（可选）")
@@ -503,7 +422,7 @@ struct ChannelEditor: View {
                     if !discoveryNotice.isEmpty {
                         Text(discoveryNotice).font(.system(size: 11)).foregroundStyle(healthy).textSelection(.enabled)
                     }
-                    Text(channel.isKimiWork ? "从当前本机 Work 登录获取模型，实际可用性以上游返回为准。查询失败会保留当前模型，你编辑的模型和别名不会被自动覆盖。" : "查询失败会保留当前模型。官方预设仅作默认配置，实际权限以服务商返回及模型测试结果为准；你编辑的模型和别名不会被自动覆盖。")
+                    Text(channel.isKimiWork ? "从 Work 最新目录获取模型与 Fast 选项，实际可用性以上游返回为准。查询失败会保留当前模型，你编辑的模型和别名不会被自动覆盖。" : "查询失败会保留当前模型。官方预设仅作默认配置，实际权限以服务商返回及模型测试结果为准；你编辑的模型和别名不会被自动覆盖。")
                         .font(.system(size: 11)).foregroundStyle(mutedInk).lineSpacing(3)
                     if !localError.isEmpty { Text(localError).font(.system(size: 12)).foregroundStyle(warning).textSelection(.enabled) }
                 }.padding(4)
@@ -577,6 +496,7 @@ struct ChannelEditor: View {
                 if channel.balanceMode == snapshot.balanceMode { channel.balanceMode = result.channel.balanceMode }
                 if channel.balancePath == snapshot.balancePath { channel.balancePath = result.channel.balancePath }
                 if !result.capabilities.isEmpty { channel.capabilities = result.capabilities }
+                if channel.isKimiWork { channel.workModels = result.channel.workModels }
                 let safeToReplace = modelRevision == revision && channel.modelLines == snapshot.modelLines && (manual || !userEditedModels)
                 if safeToReplace {
                     channel.modelLines = result.modelLines
@@ -655,87 +575,95 @@ struct AccountsView: View {
     @State private var editing: Account?
     @State private var inspecting: Account?
     @State private var search = ""
-    @State private var providerFilter = ""
+    @State private var family: SourceFamily?
     @State private var loginProxy = ""
     @State private var kiroMethod = "builder-id"
+    @State private var kimiRegion = "kimi"
+    @State private var zcodeRegion = "zcode-bigmodel"
+
+    private let providerContentHeight: CGFloat = 252
+    private let providerButtonSize = CGSize(width: 112, height: 36)
     @State private var addingCursor = false
+    @State private var addingCursorProfile: CursorAccountProfile = .cursor
     @State private var addingKiro = false
+    @State private var addingKimiWork = false
     @State private var editingWork: Channel?
     @State private var removingWork: Channel?
+    @State private var editingChannel: Channel?
+    @State private var deletingChannel: Channel?
 
-    private func isKimiAccount(_ account: Account) -> Bool {
-        ["kimi", "kimi-ai"].contains(SubscriptionProvider.find(account.loginProvider)?.id ?? account.provider)
+    init(initialFamily: SourceFamily? = nil) { _family = State(initialValue: initialFamily) }
+
+    private struct SourceGroup: Identifiable {
+        let family: SourceFamily
+        let accounts: [Account]
+        let work: [Channel]
+        let channels: [Channel]
+        var id: String { family.rawValue }
+        var count: Int { accounts.count + work.count + channels.count }
     }
 
     private var workChannels: [Channel] { store.settings.channels.filter(\.isKimiWork) }
-    private var visibleWorkChannels: [Channel] {
-        guard providerFilter.isEmpty || providerFilter == "kimi-family" else { return [] }
-        return workChannels.filter { channel in
-            search.isEmpty || [channel.name, channel.prefix, "Kimi Work 本机桌面登录 会员月度共享额度"]
-                .contains { $0.localizedCaseInsensitiveContains(search) }
-        }
-    }
-    private var connectedCount: Int { store.accounts.count + workChannels.count }
 
-    private var accountGroups: [(title: String, accounts: [Account], work: [Channel])] {
-        var groups: [(title: String, accounts: [Account], work: [Channel])] = []
-        let kimi = visibleAccounts.filter(isKimiAccount)
-        if !kimi.isEmpty || !visibleWorkChannels.isEmpty { groups.append(("Kimi · Code / Work", kimi, visibleWorkChannels)) }
-        var titles: [String] = []
-        var byTitle: [String: [Account]] = [:]
-        for account in visibleAccounts where !isKimiAccount(account) {
-            let title = account.providerTitle
-            if byTitle[title] == nil { titles.append(title) }
-            byTitle[title, default: []].append(account)
-        }
-        for title in titles.sorted(by: { $0.localizedStandardCompare($1) == .orderedAscending }) {
-            groups.append((title, byTitle[title] ?? [], []))
-        }
-        return groups
+    private func matches(_ fields: [String]) -> Bool {
+        search.isEmpty || fields.contains { $0.localizedCaseInsensitiveContains(search) }
     }
 
     private var visibleAccounts: [Account] {
         store.accounts.filter { account in
             let provider = SubscriptionProvider.find(account.loginProvider)
-            let matchesProvider = providerFilter.isEmpty || (providerFilter == "kimi-family" ? isKimiAccount(account) : (provider?.id ?? account.provider) == providerFilter)
-            let fields = [account.displayName, account.email, account.provider, provider?.title ?? "", account.providerTitle, account.note, account.name, isKimiAccount(account) ? "Kimi Code 订阅额度" : ""]
-            return matchesProvider && (search.isEmpty || fields.contains { $0.localizedCaseInsensitiveContains(search) })
+            return (family == nil || SourceFamily.of(account) == family)
+                && matches([account.displayName, account.email, account.provider, provider?.title ?? "", account.providerTitle, account.note, account.name])
         }.sorted {
             if $0.priority != $1.priority { return $0.priority > $1.priority }
             return $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending
         }
     }
 
+    private var visibleChannels: [Channel] {
+        store.settings.channels.filter { channel in
+            (family == nil || SourceFamily.of(channel) == family)
+                && matches([channel.name, channel.prefix, channel.kind, channel.baseURL, channel.relaySite, channel.manageURL] + (channel.isKimiWork ? ["Kimi Work 独立登录 会员月度共享额度"] : []))
+        }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    private var groups: [SourceGroup] {
+        let accounts = visibleAccounts, channels = visibleChannels
+        return SourceFamily.allCases.compactMap { item in
+            let group = SourceGroup(family: item,
+                                    accounts: accounts.filter { SourceFamily.of($0) == item },
+                                    work: channels.filter { $0.isKimiWork && SourceFamily.of($0) == item },
+                                    channels: channels.filter { !$0.isKimiWork && SourceFamily.of($0) == item })
+            return group.count > 0 ? group : nil
+        }
+    }
+
+    private func connectedCount(in item: SourceFamily?) -> Int {
+        guard let item else { return store.accounts.count + store.settings.channels.count }
+        return store.accounts.filter { SourceFamily.of($0) == item }.count
+            + store.settings.channels.filter { SourceFamily.of($0) == item }.count
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 28) {
-            loginSession
-            connectedAccounts
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text("添加订阅账号").font(.system(size: 16, weight: .semibold))
-                    Spacer()
-                    Text("同一服务商可添加多个账号，默认轮流使用；优先级高的优先，独立前缀可指定账号。")
-                        .font(.system(size: 11)).foregroundStyle(mutedInk)
-                }
-                DisclosureGroup("本次登录的出站代理（可选）") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        SecureField("留空继承全局代理，例如 socks5://127.0.0.1:1080", text: $loginProxy).textFieldStyle(.roundedBorder)
-                        Text("仅影响接下来发起的授权及新账号请求。已有账号可在“账号设置”中单独修改。此处不支持 direct；直连请清空全局代理。").font(.system(size: 11)).foregroundStyle(mutedInk)
-                    }.padding(.top, 10)
-                }.font(.system(size: 12))
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 300), spacing: 18, alignment: .top)], alignment: .leading, spacing: 18) {
-                    ForEach(SubscriptionProvider.all) { provider in
-                        Card { providerControls(provider) }
-                    }
-                    Card { kimiWorkControls }
+            if !store.importNotice.isEmpty {
+                HStack {
+                    NoticeBanner(text: store.importNotice, tone: store.importNotice.hasPrefix("正在") ? .info : .success)
+                    Button("知道了") { store.importNotice = "" }
                 }
             }
+            familyBar
+            loginSession
+            connectedSources
+            addSection
         }
         .sheet(item: $editing) { account in AccountOptionsView(account: account).environmentObject(store) }
         .sheet(item: $inspecting) { account in AccountModelsView(account: account).environmentObject(store) }
-        .sheet(isPresented: $addingCursor) { CursorAccountView(proxyURL: loginProxy).environmentObject(store) }
+        .sheet(isPresented: $addingCursor) { CursorAccountView(proxyURL: loginProxy, initialProfile: addingCursorProfile).environmentObject(store) }
         .sheet(isPresented: $addingKiro) { KiroCredentialImportView().environmentObject(store) }
+        .sheet(isPresented: $addingKimiWork) { KimiWorkLoginView().environmentObject(store) }
         .sheet(item: $editingWork) { channel in ChannelEditor(channel: channel).environmentObject(store) }
+        .sheet(item: $editingChannel) { channel in ChannelEditor(channel: channel).environmentObject(store) }
         .onAppear { kiroMethod = store.settings.kiroUseOrganization ? "organization" : "builder-id" }
         .confirmationDialog("删除这个订阅账号？", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), titleVisibility: .visible, presenting: removing) { account in
             Button("删除账号", role: .destructive) {
@@ -754,6 +682,118 @@ struct AccountsView: View {
             Button("取消", role: .cancel) { removingWork = nil }
         } message: { _ in
             Text("将移除这个 Work 模型通道。本机 Kimi 桌面登录和 Code 订阅账号保持不变。")
+        }
+        .confirmationDialog("删除这个 API 渠道？", isPresented: Binding(get: { deletingChannel != nil }, set: { if !$0 { deletingChannel = nil } }), titleVisibility: .visible, presenting: deletingChannel) { channel in
+            Button("删除渠道", role: .destructive) {
+                Task { await store.deleteChannel(channel) }
+                deletingChannel = nil
+            }
+            Button("取消", role: .cancel) { deletingChannel = nil }
+        } message: { channel in
+            Text("将删除“\(channel.name)”的地址、Key 和模型设置。")
+        }
+    }
+
+    private var familyBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 10) {
+                familyButton(nil)
+                ForEach(SourceFamily.allCases) { familyButton($0) }
+            }.padding(2)
+        }
+    }
+
+    private func familyButton(_ item: SourceFamily?) -> some View {
+        let isSelected = family == item
+        let count = connectedCount(in: item)
+        let title = item?.title ?? "全部"
+        return Button { family = item } label: {
+            VStack(spacing: 7) {
+                Group {
+                    if let image = item?.icon {
+                        Image(nsImage: image).renderingMode(.original).resizable().scaledToFit()
+                    } else {
+                        Image(systemName: item == nil ? "square.grid.2x2" : "link")
+                            .font(.system(size: 18, weight: .light)).foregroundStyle(mutedInk)
+                    }
+                }.frame(width: 30, height: 30)
+                    .overlay(alignment: .topTrailing) {
+                        if count > 0 {
+                            Text(String(count)).font(.system(size: 9, weight: .semibold)).monospacedDigit()
+                                .foregroundStyle(.white).padding(.horizontal, 5).padding(.vertical, 1.5)
+                                .background(accent, in: Capsule()).offset(x: 10, y: -6)
+                        }
+                    }
+                Text(title).font(.system(size: 10, weight: isSelected ? .semibold : .regular)).lineLimit(1)
+            }.frame(width: 76).padding(.vertical, 12)
+                .background(isSelected ? accent.opacity(0.08) : panel, in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(isSelected ? accent : hairline.opacity(0.6), lineWidth: isSelected ? 1.5 : 1))
+                .contentShape(Rectangle())
+        }.buttonStyle(.plain).help(item == nil ? "全部服务商" : title)
+            .accessibilityLabel(count > 0 ? "\(title)，已接入 \(count) 个" : title)
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
+            .accessibilityIdentifier("source-family-" + (item?.rawValue ?? "all"))
+    }
+
+    @ViewBuilder private var addSection: some View {
+        if let family {
+            let presets = Preset.all.filter { family.presetIDs.contains($0.id) }
+            let providers = family.subscriptionIDs.compactMap(SubscriptionProvider.find)
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("添加 " + family.title).font(.system(size: 16, weight: .semibold))
+                    Spacer()
+                    if !providers.isEmpty {
+                        Text("同一服务商可添加多个账号，默认轮流使用；优先级高的优先，独立前缀可指定账号。")
+                            .font(.system(size: 11)).foregroundStyle(mutedInk)
+                    }
+                }
+                if !providers.isEmpty {
+                    DisclosureGroup("本次登录的出站代理（可选）") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            SecureField("留空继承全局代理，例如 socks5://127.0.0.1:1080", text: $loginProxy).textFieldStyle(.roundedBorder)
+                            Text("仅影响接下来发起的授权及新账号请求。已有账号可在“账号设置”中单独修改。此处不支持 direct；直连请清空全局代理。").font(.system(size: 11)).foregroundStyle(mutedInk)
+                        }.padding(.top, 10)
+                    }.font(.system(size: 12))
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 300), spacing: 18, alignment: .top)], alignment: .leading, spacing: 18) {
+                        ForEach(providers) { provider in
+                            Card {
+                                providerControls(selectedProvider(for: provider), familyID: provider.id)
+                                    .frame(height: providerContentHeight)
+                            }
+                        }
+                        if family.includesKimiWork { Card { kimiWorkControls.frame(height: providerContentHeight) } }
+                    }
+                }
+                if !presets.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(family == .custom ? "第三方中转站" : "使用 API Key").font(.system(size: 13, weight: .semibold))
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 12)], spacing: 12) {
+                            ForEach(presets) { preset in
+                                Button {
+                                    editingChannel = preset.makeChannel(existing: store.settings.channels, accounts: store.accounts)
+                                } label: {
+                                    HStack {
+                                        Text(preset.title).font(.system(size: 12)).lineLimit(1)
+                                        Spacer()
+                                        Image(systemName: "plus").foregroundStyle(accent)
+                                    }.padding(.horizontal, 12).padding(.vertical, 11)
+                                        .background(panel, in: RoundedRectangle(cornerRadius: 9))
+                                        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(hairline.opacity(0.7)))
+                                        .contentShape(Rectangle())
+                                }.buttonStyle(.plain).help(preset.detail)
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("点击上方服务商图标，登录订阅账号或填写 API Key。")
+                    .font(.system(size: 12)).foregroundStyle(mutedInk)
+                Text("首次接入后，凭据会复制到 BridgeDock 的私有数据目录。删除源 Harness 或 Agent 后，BD 仍可独立刷新并运行账号。")
+                    .font(.system(size: 11)).foregroundStyle(mutedInk)
+            }.padding(.horizontal, 4)
         }
     }
 
@@ -805,112 +845,171 @@ struct AccountsView: View {
     private var actionsDisabled: Bool { !store.running || store.busy || store.login != nil || store.accountOperation != nil }
 
     private var kimiWorkControls: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            providerHeader(title: "Kimi Work", symbol: "desktopcomputer",
-                           detail: "本机 Kimi 桌面登录 · 会员月度共享额度，与 Kimi Code 分开计费。")
-            if !store.kimiWorkStatus.isEmpty {
-                Text(store.kimiWorkStatus).font(.system(size: 11)).foregroundStyle(mutedInk).textSelection(.enabled)
-            }
-            HStack {
-                Button(workChannels.isEmpty ? "连接本机 Work" : "重新连接本机 Work") {
-                    Task { await store.connectKimiWork() }
-                }.buttonStyle(WorkspaceButtonStyle(prominent: workChannels.isEmpty)).disabled(!store.running || store.busy)
-                Spacer()
-            }
+        VStack(alignment: .leading, spacing: 8) {
+            providerHeader(title: "Kimi Work", symbol: "globe",
+                           detail: "独立网页登录 · 会员共享额度，无需 Kimi 客户端。")
+            Color.clear.frame(height: 24)
+            providerCount(workChannels.count)
+            providerStatus(store.kimiWorkStatus)
+            HStack(spacing: 8) {
+                Button(workChannels.isEmpty ? "网页登录" : "重新网页登录") {
+                    addingKimiWork = true
+                }.buttonStyle(WorkspaceButtonStyle(prominent: workChannels.isEmpty, fixedSize: providerButtonSize))
+                    .disabled(!store.running || store.busy)
+                Spacer(minLength: 0)
+            }.frame(height: providerButtonSize.height)
+            Color.clear.frame(height: providerButtonSize.height)
         }
     }
 
-    private func providerHeader(title: String, symbol: String, detail: String) -> some View {
+    private func providerHeader(title: String, symbol: String, detail: String, sourceURL: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(title).font(.system(size: 16, weight: .semibold))
-                Spacer()
+                Text(title).font(.system(size: 16, weight: .semibold)).lineLimit(1)
+                Spacer(minLength: 4)
                 Image(systemName: symbol).foregroundStyle(accent.opacity(0.7))
+                if let sourceURL, let source = URL(string: sourceURL) {
+                    Link(destination: source) { Image(systemName: "arrow.up.right.square") }
+                        .buttonStyle(.plain).foregroundStyle(mutedInk)
+                        .help("查看适配来源").accessibilityLabel(title + " 适配来源")
+                }
             }
             Text(detail).font(.system(size: 11)).foregroundStyle(mutedInk).lineSpacing(2)
-                .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(2).help(detail)
+        }.frame(maxWidth: .infinity, alignment: .topLeading).frame(height: 64, alignment: .top)
+    }
+
+    private func selectedProvider(for provider: SubscriptionProvider) -> SubscriptionProvider {
+        let selectedID: String
+        switch provider.id {
+        case "kimi": selectedID = kimiRegion
+        case "zcode-bigmodel": selectedID = zcodeRegion
+        default: return provider
         }
+        return SubscriptionProvider.find(selectedID) ?? provider
     }
 
-    private func connectedCount(_ provider: SubscriptionProvider) -> Int {
-        store.accounts.filter { (SubscriptionProvider.find($0.loginProvider)?.id ?? $0.provider) == provider.id }.count
-    }
-
-    private func providerControls(_ provider: SubscriptionProvider) -> some View {
-        let isCursor = provider.id == CursorAccountProfile.providerID
-        let count = connectedCount(provider)
-        return VStack(alignment: .leading, spacing: 14) {
-            providerHeader(title: provider.title, symbol: provider.supportsLocalLogin ? "laptopcomputer.and.arrow.down" : "person.badge.key",
-                           detail: provider.detail)
+    private func providerCount(_ count: Int) -> some View {
+        HStack {
             if count > 0 { Pill(text: "已接入 \(count) 个") }
-            if !provider.available {
-                Text(provider.unavailableReason).font(.system(size: 11)).foregroundStyle(warning)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if provider.id == "kiro" {
+            Spacer(minLength: 0)
+        }.frame(height: 24)
+    }
+
+    private func providerStatus(_ message: String, unavailable: Bool = false) -> some View {
+        Text(message).font(.system(size: 11)).foregroundStyle(unavailable ? warning : mutedInk)
+            .lineLimit(2).textSelection(.enabled).help(message)
+            .frame(maxWidth: .infinity, alignment: .leading).frame(height: 28, alignment: .top)
+    }
+
+    @ViewBuilder private func providerTabs(familyID: String) -> some View {
+        Group {
+            if familyID == "kimi" {
+                Picker("Kimi 地区", selection: $kimiRegion) {
+                    Text("国内").tag("kimi")
+                    Text("国际").tag("kimi-ai")
+                }.accessibilityIdentifier("kimi-region")
+            } else if familyID == "zcode-bigmodel" {
+                Picker("ZCode 地区", selection: $zcodeRegion) {
+                    Text("国内").tag("zcode-bigmodel")
+                    Text("国际").tag("zcode-zai")
+                }.accessibilityIdentifier("zcode-region")
+            } else if familyID == "kiro" {
                 Picker("浏览器授权方式", selection: $kiroMethod) {
                     Text("AWS Builder ID").tag("builder-id")
                     Text("组织 SSO").tag("organization")
-                }.pickerStyle(.segmented).labelsHidden().font(.system(size: 11))
+                }
+            } else {
+                Color.clear
             }
-            if let message = store.localSubscriptionStatus[provider.id], !message.isEmpty {
-                Text(message).font(.system(size: 11)).foregroundStyle(mutedInk).textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+        }.pickerStyle(.segmented).labelsHidden().font(.system(size: 11)).frame(height: 24)
+    }
+
+    private func connectedCount(_ provider: SubscriptionProvider, familyID: String) -> Int {
+        store.accounts.filter {
+            (SubscriptionProvider.find($0.loginProvider)?.id ?? $0.provider) == provider.id
+                && (provider.id != CursorAccountProfile.providerID || SourceFamily.of($0).id == familyID)
+        }.count
+    }
+
+    private func providerControls(_ provider: SubscriptionProvider, familyID: String) -> some View {
+        let isCursor = provider.id == CursorAccountProfile.providerID
+        let isGrokBot = isCursor && familyID == "grok"
+        let title = isGrokBot ? "Grok Bot" : (familyID == "kimi" ? "Kimi Code" : (familyID == "zcode-bigmodel" ? "ZCode" : provider.title))
+        let message = provider.available ? (store.localSubscriptionStatus[provider.id] ?? "") : provider.unavailableReason
+        return VStack(alignment: .leading, spacing: 8) {
+            providerHeader(title: title, symbol: provider.supportsLocalLogin ? "laptopcomputer.and.arrow.down" : "person.badge.key",
+                           detail: isGrokBot ? "Grok Bot 使用 Cursor 网页授权 · 完成后自动保存账号" : provider.detail, sourceURL: provider.sourceURL)
+            providerTabs(familyID: familyID)
+            providerCount(connectedCount(provider, familyID: familyID))
+            providerStatus(message, unavailable: !provider.available)
             HStack(spacing: 8) {
-                if provider.supportsLocalLogin {
-                    Button("连接本机登录") { Task { await store.connectLocalSubscription(provider.id) } }
-                        .buttonStyle(WorkspaceButtonStyle(prominent: true)).disabled(actionsDisabled)
+                if isCursor {
+                    if isGrokBot {
+                        Button("Grok Bot 登录") { Task { await store.beginLogin(provider.id, proxyURL: loginProxy) } }
+                            .buttonStyle(WorkspaceButtonStyle(prominent: true, fixedSize: providerButtonSize)).disabled(actionsDisabled)
+                        Button("使用账号凭据") { addingCursorProfile = .grokBot; addingCursor = true }.disabled(actionsDisabled)
+                    } else {
+                        Button("添加 Cursor 账号") { addingCursorProfile = .cursor; addingCursor = true }
+                            .buttonStyle(WorkspaceButtonStyle(prominent: true, fixedSize: providerButtonSize)).disabled(actionsDisabled)
+                    }
+                    Button("读取本机 Cursor 登录") { Task { await store.connectLocalSubscription(provider.id) } }
+                        .disabled(actionsDisabled)
+                } else if provider.supportsLocalLogin {
+                    Button("读取本机订阅") { Task { await store.connectLocalSubscription(provider.id) } }
+                        .buttonStyle(WorkspaceButtonStyle(prominent: true, fixedSize: providerButtonSize)).disabled(actionsDisabled)
                     Button("浏览器授权") {
                         Task { await store.beginLogin(provider.id, proxyURL: loginProxy, method: provider.id == "kiro" ? kiroMethod : "") }
                     }.disabled(!provider.available || actionsDisabled)
-                } else if isCursor {
-                    Button("Grok Bot 网页登录") { Task { await store.beginLogin(provider.id, proxyURL: loginProxy) } }
-                        .buttonStyle(WorkspaceButtonStyle(prominent: true)).disabled(actionsDisabled)
-                    Button("使用账号 Key") { addingCursor = true }.disabled(!store.running || store.busy || store.accountOperation != nil)
                 } else {
                     Button("添加账号") { Task { await store.beginLogin(provider.id, proxyURL: loginProxy) } }
-                        .buttonStyle(WorkspaceButtonStyle(prominent: true))
+                        .buttonStyle(WorkspaceButtonStyle(prominent: true, fixedSize: providerButtonSize))
                         .disabled(!provider.available || provider.importOnly || actionsDisabled)
                 }
                 Spacer(minLength: 0)
-                if let source = URL(string: provider.sourceURL) {
-                    Link(destination: source) { Image(systemName: "arrow.up.right.square") }
-                        .foregroundStyle(mutedInk).help("查看适配来源").accessibilityLabel(provider.title + " 适配来源")
+            }.buttonStyle(WorkspaceButtonStyle(fixedSize: providerButtonSize)).frame(height: providerButtonSize.height)
+            HStack {
+                if provider.id == "kiro" {
+                    Button("粘贴登录凭据") { addingKiro = true }
+                        .buttonStyle(WorkspaceButtonStyle(fixedSize: providerButtonSize))
+                        .help("粘贴 Google / GitHub 凭据登录").disabled(actionsDisabled)
                 }
-            }
-            if provider.id == "kiro" {
-                Button("粘贴 Google / GitHub 凭据登录…") { addingKiro = true }
-                    .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(accent).disabled(actionsDisabled)
-            }
+                Spacer(minLength: 0)
+            }.frame(height: providerButtonSize.height)
         }
     }
 
-    private var connectedAccounts: some View {
+    private var connectedSources: some View {
         Card {
             VStack(alignment: .leading, spacing: 16) {
                 HStack {
-                    Text("已接入账号 · \(connectedCount)").font(.system(size: 15, weight: .semibold))
+                    Text((family.map { $0.title + " · " } ?? "已接入 · ") + String(connectedCount(in: family))).font(.system(size: 15, weight: .semibold))
                     Spacer()
+                    Button(store.busy ? "扫描中…" : "自动读取本机登录") {
+                        Task { await store.scanLocalSubscriptions() }
+                    }.disabled(!store.running || store.busy || store.login != nil || store.accountOperation != nil)
                     Button("导入凭据 JSON") { Task { await store.importAccount() } }.disabled(!store.running || store.busy)
                     Button("刷新列表") { Task { await store.refresh() } }.disabled(!store.running)
                 }
-                HStack {
-                    TextField("搜索账号、备注或文件名", text: $search).textFieldStyle(.roundedBorder)
-                    Picker("服务商", selection: $providerFilter) {
-                        Text("全部服务商").tag("")
-                        Text("Kimi · Code / Work").tag("kimi-family")
-                        ForEach(SubscriptionProvider.all.filter { !["kimi", "kimi-ai"].contains($0.id) }) { Text($0.title).tag($0.id) }
-                    }.labelsHidden().frame(width: 155)
+                if let scanStatus = store.localSubscriptionStatus["__all__"], !scanStatus.isEmpty {
+                    Label(scanStatus, systemImage: "checkmark.shield")
+                        .font(.system(size: 11)).foregroundStyle(mutedInk).textSelection(.enabled)
                 }
-                if visibleAccounts.isEmpty && visibleWorkChannels.isEmpty {
-                    Text(connectedCount == 0 ? "尚无账号。连接本机登录、完成浏览器授权，或导入账号凭据 JSON。" : "没有符合筛选条件的账号。")
+                TextField("搜索账号、渠道、备注或地址", text: $search).textFieldStyle(.roundedBorder)
+                if groups.isEmpty {
+                    Text(connectedCount(in: family) == 0 ? "尚未接入。在下方登录账号、填写 API Key，或导入账号凭据 JSON。" : "没有符合搜索条件的账号或渠道。")
                         .font(.system(size: 12)).foregroundStyle(mutedInk).padding(.vertical, 18)
                 }
-                ForEach(accountGroups, id: \.title) { group in
+                ForEach(groups) { group in
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(group.title + " · \(group.accounts.count + group.work.count)")
-                            .font(.system(size: 11, weight: .semibold)).foregroundStyle(mutedInk).padding(.top, 8)
+                        if family == nil {
+                            HStack(spacing: 6) {
+                                if let image = group.family.icon {
+                                    Image(nsImage: image).renderingMode(.original).resizable().scaledToFit().frame(width: 14, height: 14)
+                                }
+                                Text(group.family.title + " · \(group.count)")
+                            }.font(.system(size: 11, weight: .semibold)).foregroundStyle(mutedInk).padding(.top, 8)
+                        }
                         ForEach(group.accounts) { account in
                             Divider().opacity(0.3)
                             accountRow(account)
@@ -919,10 +1018,54 @@ struct AccountsView: View {
                             Divider().opacity(0.3)
                             workAccountRow(channel)
                         }
+                        ForEach(group.channels) { channel in
+                            Divider().opacity(0.3)
+                            channelRow(channel)
+                        }
                     }
                 }
             }
         }
+    }
+
+    private func channelRow(_ channel: Channel) -> some View {
+        HStack(alignment: .top, spacing: 14) {
+            Circle().fill(channel.enabled ? healthy : mutedInk.opacity(0.5)).frame(width: 7, height: 7).padding(.top, 6)
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 8) {
+                    Text(channel.name).font(.system(size: 13, weight: .medium))
+                    Pill(text: channel.relaySite.isEmpty ? "API Key" : "中转站 · " + channel.relaySite, active: false)
+                    if let name = store.publicPrefix(source: "channel:" + channel.id) {
+                        Text(name + "/…").font(.system(size: 11, design: .monospaced)).foregroundStyle(accent)
+                            .help("对外调用名前缀；内部路由前缀为 " + channel.prefix)
+                    }
+                }
+                Text("\(channel.wire.title) · \(channel.models.count) 个模型" + (channel.enabled ? "" : " · 已停用"))
+                    .font(.system(size: 11)).foregroundStyle(mutedInk)
+                Text(channel.baseURL).font(.system(size: 10, design: .monospaced)).foregroundStyle(mutedInk)
+                    .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+                QuotaSummaryView(target: QuotaTarget(channel: channel))
+            }
+            Spacer(minLength: 10)
+            if !channel.manageURL.isEmpty {
+                Button("中转站后台") { store.openManagePage(channel) }
+                    .help("在浏览器打开 " + channel.manageURL + "，充值、换 Key 和查看用量明细")
+            }
+            Menu {
+                Button("渠道设置与模型…") { editingChannel = channel }
+                if !channel.manageURL.isEmpty {
+                    Button("打开中转站后台") { store.openManagePage(channel) }
+                }
+                Divider()
+                Button(channel.enabled ? "停用渠道" : "启用渠道") {
+                    var value = channel; value.enabled.toggle()
+                    Task { do { try await store.saveChannel(value) } catch { store.report(error) } }
+                }
+                Button("删除渠道…", role: .destructive) { deletingChannel = channel }
+            } label: { Text("管理") }
+                .fixedSize().disabled(store.busy)
+                .accessibilityLabel("管理渠道：" + channel.name)
+        }.padding(.vertical, 6)
     }
 
     private func accountHealth(_ account: Account) -> Color {
@@ -938,6 +1081,9 @@ struct AccountsView: View {
                     Text(account.displayName).font(.system(size: 13, weight: .medium)).textSelection(.enabled)
                     if account.displayName != account.email {
                         Text(account.email).font(.system(size: 11)).foregroundStyle(mutedInk).textSelection(.enabled)
+                    }
+                    if account.managedByBridgeDock {
+                        Pill(text: "BD 已保存", active: false)
                     }
                 }
                 Text([account.providerTitle, account.statusText, store.publicPrefix(source: "account:" + account.id).map { "调用名 " + $0 + "/…" } ?? (account.prefix.isEmpty ? "账号池" : "前缀 " + account.prefix)].joined(separator: " · "))
@@ -958,8 +1104,13 @@ struct AccountsView: View {
                     if provider.supportsRecovery {
                         Button("重新授权此账号") { Task { await store.beginLogin(provider.id, account: account) } }
                             .disabled(store.login != nil || !provider.available)
+                    } else if provider.id == CursorAccountProfile.providerID {
+                        Button("更新账号凭据…") {
+                            addingCursorProfile = CursorAccountProfile(rawValue: account.runtimeProfile) ?? .cursor
+                            addingCursor = true
+                        }.disabled(actionsDisabled)
                     } else {
-                        Button(account.provider == CursorAccountProfile.providerID ? "网页登录添加 Grok Bot" : "再次登录（添加凭据）") { Task { await store.beginLogin(provider.id) } }
+                        Button("再次登录（添加凭据）") { Task { await store.beginLogin(provider.id) } }
                             .disabled(store.login != nil || !provider.available)
                     }
                 }
@@ -983,7 +1134,8 @@ struct AccountsView: View {
             Spacer(minLength: 10)
             Menu {
                 Button("Work 设置与模型…") { editingWork = channel }
-                Button("重新连接本机 Work") { Task { await store.connectKimiWork() } }
+                Button("刷新模型") { Task { await store.refreshKimiWorkModels(channel) } }
+                Button("重新网页登录") { addingKimiWork = true }
                     .disabled(!store.running)
                 Divider()
                 Button(channel.enabled ? "停用 Work" : "启用 Work") {
@@ -1010,14 +1162,19 @@ private struct CursorAccountView: View {
     @State private var saving = false
     @State private var message = ""
 
+    init(proxyURL: String, initialProfile: CursorAccountProfile = .cursor) {
+        self.proxyURL = proxyURL
+        _profile = State(initialValue: initialProfile)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             HStack {
-                Text("用 Key 添加 Cursor / Grok Bot").font(.system(size: 22, weight: .semibold))
+                Text("添加 \(profile.title) 账号").font(.system(size: 22, weight: .semibold))
                 Spacer()
                 Button("关闭") { dismiss() }.disabled(saving)
             }
-            Text("选择通道并填入账号 Key。也可以直接使用 Grok Bot 网页登录，授权完成后自动接入。")
+            Text("粘贴 Cursor 账号 Key 或会话凭据。支持“邮箱----user_…::令牌”、user_…::令牌及完整会话令牌。会话验证通过后保存，模型权限以账号实际返回为准。")
                 .font(.system(size: 12)).foregroundStyle(mutedInk).lineSpacing(4)
             HStack {
                 Button("Grok Bot 网页登录") {
@@ -1036,13 +1193,15 @@ private struct CursorAccountView: View {
                 TextField("例如：工作账号（可选）", text: $label).textFieldStyle(.roundedBorder)
             }
             VStack(alignment: .leading, spacing: 8) {
-                Text("Cursor API Key").font(.system(size: 12, weight: .medium))
-                SecureField("粘贴官方 Dashboard 创建的 API Key", text: $key).textFieldStyle(.roundedBorder)
+                Text("Cursor 账号凭据").font(.system(size: 12, weight: .medium))
+                SecureField("粘贴账号 Key 或完整会话凭据", text: $key).textFieldStyle(.roundedBorder)
+                Text("会话凭据到期后需要重新导入；账号 Key 可自动换取新令牌。")
+                    .font(.system(size: 11)).foregroundStyle(mutedInk)
             }
             if !message.isEmpty { Text(message).font(.system(size: 12)).foregroundStyle(warning).textSelection(.enabled) }
             HStack {
                 Spacer()
-                Button(saving ? "保存中…" : "添加账号") { Task { await save() } }
+                Button(saving ? "验证并保存中…" : "添加账号") { Task { await save() } }
                     .buttonStyle(WorkspaceButtonStyle(prominent: true))
                     .disabled(saving || !store.running || key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
@@ -1055,7 +1214,7 @@ private struct CursorAccountView: View {
         message = ""
         defer { saving = false }
         do {
-            try await store.addCursorAccount(label: label, key: key, profile: profile)
+            try await store.addCursorAccount(label: label, key: key, profile: profile, proxyURL: proxyURL)
             key = ""
             dismiss()
         } catch {
@@ -1189,7 +1348,9 @@ struct QuotaSummaryView: View {
     }
     var body: some View {
         Group {
-            if let metric = state?.snapshot?.metrics.first {
+            if !target.queryAvailable {
+                Text(target.queryHint)
+            } else if let metric = state?.snapshot.flatMap({ QuotaParser.displayMetrics($0).first }) {
                 if metric.unlimited { Text("\(metric.title) · 无上限") }
                 else if let remaining = metric.remainingAmount { Text("\(metric.title) · 剩余 \(QuotaParser.amount(remaining)) \(metric.unit)") }
                 else if let percentage = metric.usedPercentage { Text("\(metric.title) · 已用 \(percentage.formatted(.number.precision(.fractionLength(0...1))))%") }
@@ -1204,54 +1365,122 @@ struct QuotaSummaryView: View {
 struct BalancesView: View {
     @EnvironmentObject var store: BridgeStore
     @State private var search = ""
-    var targets: [QuotaTarget] { store.quotaTargets.filter { search.isEmpty || ($0.title + $0.subtitle).localizedCaseInsensitiveContains(search) } }
+    @State private var refreshingAll = false
+    private func state(_ target: QuotaTarget) -> QuotaState? {
+        let value = store.quotaStates[target.id]
+        return value?.fingerprint == target.fingerprint ? value : nil
+    }
+    private func peak(_ target: QuotaTarget) -> Double {
+        state(target)?.snapshot?.metrics.compactMap(\.usedPercentage).max() ?? -1
+    }
+    private var targets: [QuotaTarget] {
+        store.quotaTargets
+            .filter { search.isEmpty || ($0.title + $0.subtitle + $0.group).localizedCaseInsensitiveContains(search) }
+            .enumerated().sorted { lhs, rhs in
+                let a = peak(lhs.element) >= 90, b = peak(rhs.element) >= 90
+                if a != b { return a }
+                if a { return peak(lhs.element) > peak(rhs.element) }
+                return lhs.offset < rhs.offset
+            }.map(\.element)
+    }
+    private var groups: [(name: String, targets: [QuotaTarget])] {
+        var order: [String] = []
+        var members: [String: [QuotaTarget]] = [:]
+        for target in targets {
+            if members[target.group] == nil { order.append(target.group) }
+            members[target.group, default: []].append(target)
+        }
+        let channels = "API 渠道"
+        return (order.filter { $0 != channels } + order.filter { $0 == channels }).map { ($0, members[$0]!) }
+    }
+    private var nearlyExhausted: Int { store.quotaTargets.filter { peak($0) >= 90 }.count }
+    private var failed: Int { store.quotaTargets.filter { state($0)?.error != nil }.count }
+    private var unconfigured: Int { store.quotaTargets.filter { !$0.queryAvailable }.count }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            HStack {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("\(store.accounts.count + store.settings.channels.filter(\.isKimiWork).count) 个订阅账号 · \(store.settings.channels.filter { !$0.isKimiWork }.count) 个 API 渠道").font(.system(size: 15, weight: .medium))
-                    Text("代理运行时每 5 分钟更新。各币种、平台积分和额度按原始单位分别展示。").font(.system(size: 11)).foregroundStyle(mutedInk)
-                }
+        VStack(alignment: .leading, spacing: 20) {
+            HStack(spacing: 12) {
+                summary("账号与渠道", "\(store.quotaTargets.count)", ink)
+                summary("即将用完 · ≥90%", "\(nearlyExhausted)", nearlyExhausted > 0 ? warning : mutedInk)
+                summary("查询出错", "\(failed)", failed > 0 ? failureTint : mutedInk)
+                summary("未配置查询", "\(unconfigured)", unconfigured > 0 ? mutedInk : mutedInk.opacity(0.7))
                 Spacer()
-                Button("刷新全部") { Task { await store.refreshQuotas(force: true) } }
-                    .disabled(!store.running || store.quotaRefreshing)
-            }
-            TextField("搜索账号、渠道或服务商", text: $search).textFieldStyle(.roundedBorder)
-            if store.quotaTargets.isEmpty {
-                Card {
-                    Text("添加订阅账号或 API 渠道后，这里会逐项显示余额和额度。").font(.system(size: 14)).foregroundStyle(mutedInk).padding(.vertical, 35)
+                VStack(alignment: .trailing, spacing: 6) {
+                    Button(refreshingAll || store.quotaRefreshing ? "刷新中…" : "刷新全部") {
+                        Task { refreshingAll = true; await store.refreshQuotas(force: true); refreshingAll = false }
+                    }.disabled(!store.running || store.quotaRefreshing)
+                    Text(store.running ? "运行时每 5 分钟自动更新" : "服务未运行，无法查询").captionText(10)
                 }
             }
-            ForEach(targets) { target in QuotaCardView(target: target) }
+            SearchField(prompt: "搜索账号、渠道或服务商", text: $search)
+            if store.quotaTargets.isEmpty {
+                Card { Text("添加订阅账号或 API 渠道后，这里会逐项显示余额和额度。").captionText(14).padding(.vertical, 35) }
+            } else if targets.isEmpty {
+                Card {
+                    VStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass").font(.system(size: 24)).foregroundStyle(mutedInk)
+                        Text("没有匹配「\(search)」的账号或渠道").font(.system(size: 13, weight: .medium))
+                        Text("试试服务商名称或更短的关键词。").captionText()
+                    }.frame(maxWidth: .infinity).padding(.vertical, 30)
+                }
+            } else {
+                ForEach(groups, id: \.name) { group in
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 8) {
+                            Text(group.name).sectionTitle()
+                            Pill(text: "\(group.targets.count)", active: false)
+                        }
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 320), spacing: 16, alignment: .top)], spacing: 16) {
+                            ForEach(group.targets) { target in QuotaCardView(target: target) }
+                        }
+                    }
+                }
+            }
         }.task { await store.refreshQuotas() }
+    }
+
+    private func summary(_ title: String, _ value: String, _ color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).captionText(10)
+            Text(value).font(.system(size: 20, weight: .medium)).monospacedDigit().foregroundStyle(color)
+        }.padding(.horizontal, 16).padding(.vertical, 10).frame(minWidth: 120, alignment: .leading)
+            .background(panel, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(hairline.opacity(0.7)))
     }
 }
 
 struct QuotaCardView: View {
     @EnvironmentObject var store: BridgeStore
     let target: QuotaTarget
+    @State private var requested = false
     private var state: QuotaState? {
         let value = store.quotaStates[target.id]
         return value?.fingerprint == target.fingerprint ? value : nil
     }
+    private var loading: Bool { requested || state?.loading == true }
     var body: some View {
-        Card {
-            VStack(alignment: .leading, spacing: 18) {
+        Card(padding: 20) {
+            VStack(alignment: .leading, spacing: 14) {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 5) {
-                        Text(target.title).font(.system(size: 17, weight: .semibold)).textSelection(.enabled)
-                        Text(target.subtitle).font(.system(size: 11)).foregroundStyle(mutedInk)
+                        Text(target.title).font(.system(size: 15, weight: .semibold)).lineLimit(1).textSelection(.enabled)
+                        Text(target.subtitle).captionText()
                     }
                     Spacer()
-                    if state?.loading == true { ProgressView().controlSize(.small) }
-                    Button("刷新") { Task { await store.refreshQuotas(force: true, only: target.id) } }.disabled(!store.running || store.quotaRefreshing)
+                    if state?.error != nil && state?.snapshot != nil { Pill(text: "过期", tint: warning) }
+                    if loading { ProgressView().controlSize(.small) }
+                    Button("刷新") {
+                        Task { requested = true; await store.refreshQuotas(force: true, only: target.id); requested = false }
+                    }.disabled(!store.running || loading || !target.queryAvailable)
+                        .help(store.running ? (store.quotaRefreshing && !loading ? "其他项目正在刷新，完成后再试" : "刷新此项") : "服务未运行")
                 }
                 if let error = state?.error {
-                    Text((state?.snapshot == nil ? "" : "刷新失败，以下为上次成功数据。\n") + error).font(.system(size: 12)).foregroundStyle(warning).textSelection(.enabled)
+                    Text((state?.snapshot == nil ? "" : "刷新失败，以下为上次成功数据。\n") + error)
+                        .font(.system(size: 11)).foregroundStyle(failureTint).textSelection(.enabled)
                 }
                 if let snapshot = state?.snapshot {
                     if let plan = snapshot.plan { Pill(text: "套餐 · " + plan) }
-                    ForEach(snapshot.metrics) { metric in QuotaMetricView(metric: metric) }
+                    ForEach(QuotaParser.displayMetrics(snapshot)) { metric in QuotaMetricView(metric: metric) }
                     ForEach(snapshot.details) { detail in
                         HStack(alignment: .top) {
                             Text(detail.label).foregroundStyle(mutedInk)
@@ -1259,14 +1488,16 @@ struct QuotaCardView: View {
                             Text(detail.value).multilineTextAlignment(.trailing).textSelection(.enabled)
                         }.font(.system(size: 11))
                     }
-                    ForEach(snapshot.notes, id: \.self) { Text($0).font(.system(size: 11)).foregroundStyle(mutedInk).textSelection(.enabled) }
+                    ForEach(snapshot.notes, id: \.self) { Text($0).captionText().textSelection(.enabled) }
                     HStack {
                         Text(snapshot.source)
                         Spacer()
-                        Text("更新于 " + snapshot.fetchedAt.formatted(date: .abbreviated, time: .standard))
-                    }.font(.system(size: 10)).foregroundStyle(mutedInk)
+                        Text("更新于 " + snapshot.fetchedAt.formatted(date: .abbreviated, time: .shortened))
+                    }.captionText(10).opacity(state?.error != nil ? 0.6 : 1)
+                } else if !target.queryAvailable {
+                    Text(target.queryHint).captionText(12)
                 } else if state?.error == nil {
-                    Text(state?.loading == true ? "正在向服务商读取余额与额度…" : store.running ? "尚未查询" : "启动代理后查询").font(.system(size: 12)).foregroundStyle(mutedInk)
+                    Text(loading ? "正在向服务商读取余额与额度…" : store.running ? "尚未查询" : "启动服务后查询").captionText(12)
                 }
             }
         }
@@ -1276,37 +1507,37 @@ struct QuotaCardView: View {
 struct QuotaMetricView: View {
     let metric: QuotaMetric
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(metric.title).font(.system(size: 13, weight: .medium))
+                Text(metric.title).font(.system(size: 12, weight: .medium))
                 Spacer()
                 if let percentage = metric.usedPercentage {
-                    Text("已用 \(percentage.formatted(.number.precision(.fractionLength(0...2))))% · 剩余 \(max(0, 100 - percentage).formatted(.number.precision(.fractionLength(0...2))))%")
-                        .font(.system(size: 11)).foregroundStyle(percentage >= 90 ? warning : healthy)
+                    Text("已用 \(percentage.formatted(.number.precision(.fractionLength(0...1))))%")
+                        .font(.system(size: 11, weight: .medium)).monospacedDigit().foregroundStyle(percentage >= 90 ? warning : healthy)
                 }
             }
             if let percentage = metric.usedPercentage {
                 ProgressView(value: min(100, max(0, percentage)), total: 100).tint(percentage >= 90 ? warning : healthy)
             }
             if metric.used != nil || metric.limit != nil {
-                HStack(spacing: 28) {
-                    amount("可用 / 剩余", metric.remainingAmount, override: metric.unlimited ? "无上限" : nil)
+                HStack(spacing: 16) {
+                    amount("剩余", metric.remainingAmount, override: metric.unlimited ? "无上限" : nil)
                     amount("已使用", metric.used)
-                    amount("总额度 / 预算", metric.limit, override: metric.unlimited ? "无上限" : nil)
+                    amount("总额度", metric.limit, override: metric.unlimited ? "无上限" : nil)
                 }
             } else if metric.remaining != nil || metric.unlimited {
                 Text(metric.unlimited ? "无上限" : QuotaParser.amount(metric.remaining!) + " " + metric.unit)
-                    .font(.system(size: 20, weight: .medium)).textSelection(.enabled)
+                    .font(.system(size: 18, weight: .medium)).textSelection(.enabled)
             } else if metric.usedPercentage == nil {
-                Text("服务商未提供此项数值").font(.system(size: 11)).foregroundStyle(mutedInk)
+                Text("服务商未提供此项数值").captionText()
             }
-            if let date = metric.reset { Text(metric.resetLabel + " · " + date.formatted(date: .abbreviated, time: .standard)).font(.system(size: 11)).foregroundStyle(mutedInk) }
+            if let date = metric.reset { Text(metric.resetLabel + " · " + date.formatted(date: .abbreviated, time: .shortened)).captionText() }
             if !metric.note.isEmpty { Text(metric.note).font(.system(size: 11)).foregroundStyle(warning) }
-        }.padding(16).background(insetSurface, in: RoundedRectangle(cornerRadius: 10))
+        }.padding(12).background(insetSurface, in: RoundedRectangle(cornerRadius: 10))
     }
     private func amount(_ label: String, _ value: Decimal?, override: String? = nil) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(label).font(.system(size: 10)).foregroundStyle(mutedInk)
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label).captionText(10)
             Text(override ?? value.map { QuotaParser.amount($0) + " " + metric.unit } ?? "未提供").font(.system(size: 12, weight: .medium)).textSelection(.enabled)
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -1318,62 +1549,282 @@ struct ModelsView: View {
     @State private var selectedModel = ""
     @State private var wire = "chat"
     @State private var testMode = ModelTestMode.quick
-    var filtered: [ModelItem] { store.models.filter { search.isEmpty || $0.id.localizedCaseInsensitiveContains(search) } }
+    @State private var effort = ModelReasoningEffort.medium
+    @State private var providerKey = ""
+    private var providers: [ModelPublishing.Provider] { store.providers(for: trimmedModel) }
+    /// 所选供应商；未选或已失效时取第一个（默认供应商）。
+    private var provider: ModelPublishing.Provider? { providers.first { $0.key == providerKey } ?? providers.first }
+    private var filtered: [ModelItem] {
+        store.models.filter { search.isEmpty || ($0.id + " " + $0.owner).localizedCaseInsensitiveContains(search) }
+    }
+    private var trimmedModel: String { selectedModel.trimmingCharacters(in: .whitespacesAndNewlines) }
+    /// 只列出所选供应商声明支持的推理强度；能力未知时保留全部选项。
+    private var efforts: [ModelReasoningEffort] {
+        guard let declared = provider?.capability?.reasoningEfforts else { return ModelReasoningEffort.allCases }
+        return [.unset] + declared.filter { $0 != "none" }.map(ModelReasoningEffort.init(rawValue:))
+    }
+    private func effortTitle(_ value: ModelReasoningEffort) -> String {
+        value == .unset ? value.title : provider?.capability?.label(ofEffort: value.rawValue) ?? value.rawValue
+    }
+    private var startBlocker: String? {
+        if !store.running { return "服务未运行" }
+        if trimmedModel.isEmpty { return "请先在左侧选择模型" }
+        return nil
+    }
+
     var body: some View {
-        VStack(spacing: 28) {
-            Card {
+        VStack(alignment: .leading, spacing: 16) {
+            if !store.running { serviceBanner }
+            HStack(alignment: .top, spacing: 18) {
+                modelList.frame(width: 300)
+                testPanel.frame(maxWidth: .infinity)
+            }
+        }
+        .onAppear { if trimmedModel.isEmpty, let first = store.models.first { selectedModel = first.id } }
+        .onChange(of: selectedModel) { _, _ in providerKey = providers.first?.key ?? ""; clampEffort() }
+        .onChange(of: providerKey) { _, _ in clampEffort() }
+    }
+
+    private func clampEffort() {
+        if !efforts.contains(effort) { effort = efforts.last ?? .unset }
+    }
+
+    private var serviceBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "pause.circle.fill").font(.system(size: 16)).foregroundStyle(warning)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("服务未运行").font(.system(size: 13, weight: .semibold))
+                Text("检测请求需经过本机反代 127.0.0.1:\(String(store.settings.port))，启动后即可测试。").captionText()
+            }
+            Spacer()
+            Button("启动服务") { Task { await store.start() } }.buttonStyle(WorkspaceButtonStyle(prominent: true)).disabled(store.busy)
+        }.padding(14).background(warning.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(warning.opacity(0.25)))
+    }
+
+    private var modelList: some View {
+        Card(padding: 16) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("已发布模型").sectionTitle()
+                    Spacer()
+                    Text(search.isEmpty ? "\(store.models.count) 个" : "\(filtered.count) / \(store.models.count)").captionText().monospacedDigit()
+                }
+                SearchField(prompt: "搜索模型或渠道", text: $search)
+                if filtered.isEmpty { emptyList }
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(filtered) { model in row(model) }
+                }
+            }
+        }
+    }
+
+    private var emptyList: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(store.availableModels.isEmpty ? "暂无模型。先在「账号与渠道」添加 API 渠道或登录账号。"
+                 : (search.isEmpty ? "尚未发布模型，勾选要使用的模型后即可在这里测试。" : "没有匹配「\(search)」的已发布模型。"))
+                .captionText(12).fixedSize(horizontal: false, vertical: true)
+            if search.isEmpty && !store.availableModels.isEmpty { ModelPublicationButton(title: "选择反代模型") }
+        }.padding(.vertical, 16)
+    }
+
+    private func row(_ model: ModelItem) -> some View {
+        let active = model.id == trimmedModel
+        return Button { selectedModel = model.id } label: {
+            HStack(spacing: 10) {
+                RoundedRectangle(cornerRadius: 2).fill(active ? accent : Color.clear).frame(width: 3, height: 30)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(model.id).monoSmall(12).fontWeight(active ? .semibold : .regular).lineLimit(1).truncationMode(.middle)
+                    providerTags(model)
+                }
+                Spacer(minLength: 0)
+            }.padding(.trailing, 10).padding(.vertical, 7).frame(maxWidth: .infinity, alignment: .leading)
+                .background(active ? accent.opacity(0.08) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+                .contentShape(Rectangle())
+        }.buttonStyle(.plain).disabled(store.testing)
+            .help(model.id + "\n" + ModelPublishing.capabilitySummary(store.providers(for: model.id).first?.capability))
+            .contextMenu { Button("复制模型 ID") { store.copy(model.id) } }
+    }
+
+    private func providerTags(_ model: ModelItem) -> some View {
+        let names = model.owner.components(separatedBy: " / ").filter { !$0.isEmpty }
+        return HStack(spacing: 4) {
+            ForEach(Array(names.prefix(2).enumerated()), id: \.offset) { _, name in
+                Text(name).font(.system(size: 10, weight: .medium)).foregroundStyle(mutedInk).lineLimit(1)
+                    .padding(.horizontal, 6).padding(.vertical, 2).background(Color.gray.opacity(0.1), in: Capsule())
+            }
+            if names.count > 2 { Text("+\(names.count - 2)").captionText(10) }
+        }.help(model.owner)
+    }
+
+    private var testPanel: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Card(padding: 22) {
                 VStack(alignment: .leading, spacing: 22) {
-                    HStack { Text("模型检测").font(.system(size: 14, weight: .semibold)); Spacer(); Pill(text: "真实请求 · 消耗模型额度", active: false) }
-                    Picker("检测方向", selection: $testMode) {
-                        ForEach(ModelTestMode.allCases) { mode in Text(mode.title).tag(mode) }
-                    }.pickerStyle(.segmented).disabled(store.testing)
-                        .accessibilityIdentifier("model-test-mode")
-                    Text(testMode.detail).font(.system(size: 12)).foregroundStyle(mutedInk)
-                    TextField("模型 ID，可从下方列表选择", text: $selectedModel).textFieldStyle(.roundedBorder).font(.system(size: 12, design: .monospaced))
-                        .disabled(store.testing).accessibilityIdentifier("model-test-id")
-                    HStack {
-                        Picker("协议", selection: $wire) { Text("Chat Completions").tag("chat"); Text("Responses").tag("responses"); Text("Anthropic Messages").tag("anthropic") }.pickerStyle(.segmented).disabled(store.testing)
-                        if store.testing {
-                            Button("取消测试") { store.cancelModelTest() }
-                        } else {
-                            Button("开始测试") { store.startModelTest(selectedModel.trimmingCharacters(in: .whitespacesAndNewlines), wire: wire, mode: testMode) }
-                                .buttonStyle(WorkspaceButtonStyle(prominent: true))
-                                .disabled(selectedModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.running)
-                                .accessibilityIdentifier("model-test-start")
-                        }
-                    }
-                    if !store.testResult.isEmpty {
-                        HStack(spacing: 8) {
-                            if store.testing { ProgressView().controlSize(.small) }
-                            Text(store.testResult).font(.system(size: 12)).foregroundStyle(mutedInk)
-                        }
-                    }
-                    if let report = store.testReport { ModelDiagnosticResultView(report: report) }
+                    step(1, "测试哪个模型") { modelSection }
+                    Divider().opacity(0.5)
+                    step(2, "怎么测") { modeCards }
+                    Divider().opacity(0.5)
+                    step(3, "请求设置") { requestSettings }
+                    Divider().opacity(0.5)
+                    actionBar
                 }
             }
-            Card {
-                VStack(alignment: .leading, spacing: 16) {
-                    HStack {
-                        Text("已发布模型 · \(store.models.count)").font(.system(size: 14, weight: .semibold))
-                        Spacer()
-                        TextField("搜索模型", text: $search).textFieldStyle(.roundedBorder).frame(width: 180)
-                        ModelPublicationButton(title: "选择反代模型")
-                        Button("刷新目录") { Task { await store.refresh() } }
+            if let report = store.testReport { ModelDiagnosticResultView(report: report) }
+        }
+    }
+
+    private var modelSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            TextField("从左侧选择，或直接填写模型 ID", text: $selectedModel).textFieldStyle(.roundedBorder).monoSmall(12)
+                .disabled(store.testing).accessibilityIdentifier("model-test-id")
+            if !providers.isEmpty {
+                HStack(spacing: 10) {
+                    Text("供应商").captionText(12)
+                    if providers.count < 2, let provider {
+                        Text(provider.name).font(.system(size: 12, weight: .medium))
+                    } else {
+                        Picker("供应商", selection: Binding(get: { provider?.key ?? "" }, set: { providerKey = $0 })) {
+                            ForEach(Array(providers.enumerated()), id: \.element.key) { index, item in
+                                Text(item.name + (index == 0 ? "（默认）" : "")).tag(item.key)
+                            }
+                        }.labelsHidden().disabled(store.testing).frame(maxWidth: 260, alignment: .leading)
                     }
-                    if filtered.isEmpty {
-                        Text(store.availableModels.isEmpty ? "暂无模型。先添加 API 渠道或登录账号，再刷新目录。" : (search.isEmpty ? "尚未发布模型。点击“选择反代模型”勾选要使用的模型。" : "没有匹配的已发布模型。"))
-                            .font(.system(size: 12)).foregroundStyle(mutedInk).padding(.vertical, 30)
-                    }
-                    ForEach(filtered) { model in
-                        HStack {
-                            Image(systemName: "cube").foregroundStyle(accent.opacity(0.7))
-                            VStack(alignment: .leading, spacing: 4) { Text(model.id).font(.system(size: 12, design: .monospaced)).textSelection(.enabled); Text(model.owner).font(.system(size: 10)).foregroundStyle(mutedInk) }
-                            Spacer(); Button("复制") { store.copy(model.id) }; Button("选择测试") { selectedModel = model.id }.disabled(store.testing)
-                        }.padding(.vertical, 5)
-                        Divider().opacity(0.25)
-                    }
+                    Spacer(minLength: 0)
+                }.accessibilityIdentifier("model-test-provider")
+                HStack(spacing: 6) {
+                    Image(systemName: "info.circle").font(.system(size: 10))
+                    Text(capabilityLine).lineLimit(2)
+                }.captionText(11)
+            }
+        }
+    }
+
+    private var capabilityLine: String {
+        var parts = [ModelPublishing.capabilitySummary(provider?.capability)]
+        if let provider, provider.model.cursorRoute == nil, provider.model.workModel == nil {
+            parts.append(provider.contextOptions.isEmpty ? "尚未实测长上下文"
+                         : "实测上下文 " + provider.contextOptions.map(ModelPublishing.tokenLabel).joined(separator: " / "))
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private var modeCards: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+                ForEach(ModelTestMode.allCases) { mode in modeCard(mode) }
+            }.accessibilityIdentifier("model-test-mode")
+            Text(testMode.detail).captionText().fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func modeCard(_ mode: ModelTestMode) -> some View {
+        let active = mode == testMode
+        return Button { testMode = mode } label: {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: mode.symbol).font(.system(size: 15)).frame(width: 22, height: 22)
+                    .foregroundStyle(active ? accent : mutedInk)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(mode.title).font(.system(size: 13, weight: .semibold)).foregroundStyle(ink)
+                    Text(mode.summary).captionText(11)
+                    Text(mode.cost).font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(mode == .longContext ? warning : mutedInk.opacity(0.85))
+                }
+                Spacer(minLength: 0)
+                Image(systemName: active ? "checkmark.circle.fill" : "circle").foregroundStyle(active ? accent : hairline)
+            }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                .background(active ? accent.opacity(0.06) : insetSurface.opacity(0.6), in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(active ? accent.opacity(0.45) : hairline.opacity(0.7)))
+                .contentShape(Rectangle())
+        }.buttonStyle(.plain).disabled(store.testing)
+    }
+
+    private var requestSettings: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            field("协议") {
+                Picker("协议", selection: $wire) {
+                    Text("Chat Completions").tag("chat"); Text("Responses").tag("responses"); Text("Anthropic Messages").tag("anthropic")
+                }.pickerStyle(.segmented).labelsHidden().disabled(store.testing).frame(maxWidth: 460)
+                Text(wireHint).captionText(10)
+            }
+            if testMode == .reasoning {
+                field("推理强度") {
+                    Picker("推理强度", selection: $effort) {
+                        ForEach(efforts) { value in Text(effortTitle(value)).tag(value) }
+                    }.pickerStyle(.segmented).labelsHidden().disabled(store.testing).frame(maxWidth: 460)
+                        .accessibilityIdentifier("model-test-effort")
+                    Text(efforts == [.unset] ? "该模型未声明可调推理强度。" : "与官方渠道用同一强度对比，才能看出是否降智。").captionText(10)
                 }
             }
+        }
+    }
+
+    private var wireHint: String {
+        switch wire {
+        case "responses": return "Codex 等使用 OpenAI Responses 接口的工具选这个。"
+        case "anthropic": return "Claude Code、Claude Desktop 选这个；降智检测时还会核对 thinking 签名。"
+        default: return "大多数 OpenAI 兼容工具选这个。"
+        }
+    }
+
+    private var actionBar: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    if let blocker = startBlocker, !store.testing {
+                        Label(blocker, systemImage: "exclamationmark.circle").font(.system(size: 12)).foregroundStyle(warning)
+                    } else {
+                        Text(trimmedModel.isEmpty ? "—" : trimmedModel).monoSmall(12).fontWeight(.medium).lineLimit(1).truncationMode(.middle)
+                        Text(testMode.title + " · " + testMode.cost + " · 真实请求会消耗额度").captionText(10)
+                    }
+                }
+                Spacer()
+                if store.testing {
+                    Button { store.cancelModelTest() } label: { Label("取消测试", systemImage: "stop.fill") }
+                } else {
+                    Button { store.startModelTest(trimmedModel, wire: wire, mode: testMode, effort: effort, provider: provider?.key) } label: {
+                        Label(store.testReport == nil ? "开始测试" : "重新测试", systemImage: "play.fill").padding(.horizontal, 6)
+                    }
+                    .buttonStyle(WorkspaceButtonStyle(prominent: true)).disabled(startBlocker != nil)
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .help("⌘↩ 开始测试")
+                    .accessibilityIdentifier("model-test-start")
+                }
+            }
+            if store.testing, let report = store.testReport {
+                ProgressView(value: Double(report.samples.count), total: Double(max(report.plannedCount, 1))).tint(accent)
+            }
+            if !store.testResult.isEmpty { resultStatus }
+        }
+    }
+
+    private var resultStatus: some View {
+        let report = store.testReport
+        let tone: NoticeTone
+        if store.testing || report == nil || report?.cancelled == true { tone = .info }
+        else if let report, report.successful == report.samples.count, !report.samples.isEmpty { tone = .success }
+        else { tone = .failure }
+        return HStack(spacing: 8) {
+            if store.testing { ProgressView().controlSize(.small) }
+            NoticeBanner(text: store.testResult, tone: tone)
+        }
+    }
+
+    private func step<Content: View>(_ index: Int, _ title: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(alignment: .top, spacing: 14) {
+            Text(String(index)).font(.system(size: 11, weight: .semibold)).monospacedDigit().foregroundStyle(accent)
+                .frame(width: 22, height: 22).background(accent.opacity(0.1), in: Circle())
+            VStack(alignment: .leading, spacing: 10) {
+                Text(title).sectionTitle()
+                content()
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func field<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(title).font(.system(size: 11, weight: .medium)).foregroundStyle(mutedInk)
+            content()
         }
     }
 }
@@ -1385,14 +1836,45 @@ struct ClientsView: View {
     @State private var context = "32768"
     @State private var visible = false
     @State private var message = ""
+    @State private var messageTone = NoticeTone.success
     @State private var filePath = ""
     @State private var confirmingApply = false
     @State private var confirmingRestore = false
     var profile: ConnectionProfile { ConnectionProfile(tool: tool, baseURL: store.baseURL, key: store.settings.clientKey, model: model, contextSize: max(1, Int(context) ?? 32768)) }
+    private var applyBlocker: String? {
+        if !store.running { return "服务未运行，先启动服务" }
+        if model.isEmpty { return "请先选择模型" }
+        if filePath.isEmpty { return "请填写配置文件路径" }
+        return nil
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 28) {
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 14), count: 4), spacing: 14) { ForEach(ClientTool.allCases) { item in
-                Button { tool = item; message = ""; resetPath(); model = store.settings.selectedModels[item.rawValue] ?? "" } label: {
+        VStack(alignment: .leading, spacing: 18) {
+            toolGrid
+            if tool == .cursor {
+                CursorChineseCard()
+                CursorLocalView()
+            } else {
+                statusCard
+                if tool != .kiro { modelCard }
+                connectionCard
+            }
+        }.onAppear { resetPath(); model = store.settings.selectedModels[tool.rawValue] ?? "" }
+            .confirmationDialog("将应用连接配置，并备份目标文件。", isPresented: $confirmingApply) {
+                Button("备份并应用") { apply() }
+            } message: { Text(filePath + "\n模型 · " + model) }
+            .confirmationDialog("恢复本工具上一次应用之前的配置？", isPresented: $confirmingRestore) {
+                Button("恢复配置") {
+                    do { try ConfigurationInstaller(directory: store.dataDirectory).restore(URL(fileURLWithPath: filePath)); notify("已恢复上一次配置。"); store.record("已恢复 \(tool.rawValue) 配置") }
+                    catch { notify(store.redacted(error.localizedDescription), .failure); store.report(error) }
+                }
+            }
+    }
+
+    private var toolGrid: some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 14), count: 4), spacing: 14) {
+            ForEach(ClientTool.allCases) { item in
+                Button { select(item) } label: {
                     HStack(spacing: 12) {
                         if let logo = item.brandIcon {
                             Image(nsImage: logo).renderingMode(.original).resizable().scaledToFit()
@@ -1402,79 +1884,149 @@ struct ClientsView: View {
                         }
                         VStack(alignment: .leading, spacing: 4) {
                             Text(item.rawValue).font(.system(size: 13, weight: .semibold))
-                            if item == .cursor { Text("反代 / 官方账号").font(.system(size: 10)) }
-                            if item == .claudeDesktop { Text("桌面端 · Chat / Cowork").font(.system(size: 10)) }
+                            if let hint = hint(item) { Text(hint).font(.system(size: 10)) }
                         }
                         Spacer(minLength: 0)
+                        if store.settings.selectedModels[item.rawValue] != nil { Circle().fill(healthy).frame(width: 6, height: 6).help("已应用过模型") }
                     }
-                        .padding(.horizontal, 18).frame(maxWidth: .infinity, minHeight: 76).foregroundStyle(tool == item ? accent : mutedInk)
-                        .background(tool == item ? accent.opacity(0.08) : panel, in: RoundedRectangle(cornerRadius: 12))
-                        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(tool == item ? accent.opacity(0.35) : hairline.opacity(0.75)))
-                        .contentShape(Rectangle())
+                    .padding(.horizontal, 18).frame(maxWidth: .infinity, minHeight: 76).foregroundStyle(tool == item ? accent : mutedInk)
+                    .background(tool == item ? accent.opacity(0.08) : panel, in: RoundedRectangle(cornerRadius: 12))
+                    .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(tool == item ? accent.opacity(0.35) : hairline.opacity(0.75)))
+                    .contentShape(Rectangle())
                 }.buttonStyle(.plain).accessibilityLabel(item.rawValue)
-            } }
-            if tool == .cursor {
-                CursorChineseCard()
-                CursorLocalView()
-            } else {
-            if tool != .kiro {
-                Card {
-                    VStack(alignment: .leading, spacing: 22) {
-                        HStack { Text("给 \(tool.rawValue) 选择模型").font(.system(size: 15, weight: .semibold)); Spacer(); Pill(text: "可独立配置") }
-                        HStack {
-                            TextField("填写已开放的模型名，例如 渠道名称前四字/模型别名", text: $model).textFieldStyle(.roundedBorder)
-                            Menu("从目录选择") { ForEach(store.models) { item in Button(item.id) { model = item.id } } }.disabled(store.models.isEmpty).frame(width: 140)
-                        }
-                        if tool == .kimi { TextField("模型上下文长度（按服务商填写）", text: $context).textFieldStyle(.roundedBorder) }
-                        if let _ = tool.file {
-                            HStack { TextField("配置文件", text: $filePath).textFieldStyle(.roundedBorder); Button("选择文件") { chooseFile() } }
-                            Text("应用时备份现有文件，再合并模型连接字段。项目级配置或终端环境变量可能优先于此配置。").font(.system(size: 11)).foregroundStyle(mutedInk)
-                        } else if tool == .claudeDesktop {
-                            Text("在 Claude 中打开 Help → Troubleshooting → Enable Developer Mode，重启后选择 Developer → Configure Third-Party Inference。选择 Gateway 和 Static API key，填入下方地址、密钥及模型 ID，测试连接并应用后重启 Claude。").font(.system(size: 12)).foregroundStyle(mutedInk)
-                            HStack {
-                                Button("打开 Claude") { Task { await store.openClaudeDesktop() } }.disabled(store.launchingAgent || store.busy)
-                                Link("官方配置说明", destination: URL(string: "https://claude.com/docs/third-party/claude-desktop/gateway")!)
-                            }
-                            Text("这里配置 Claude 桌面端的第三方推理网关。请先在“模型与测试”中验证 Anthropic Messages；模型能力与桌面端功能以实际兼容情况为准。").font(.system(size: 11)).foregroundStyle(mutedInk)
-                        } else { Text("在目标工具的模型服务商设置中，新增 OpenAI 兼容服务商并粘贴下面的信息。").font(.system(size: 12)).foregroundStyle(mutedInk) }
-                    }
-                }
             }
-            Card {
-                VStack(alignment: .leading, spacing: 22) {
-                    HStack { Text(tool == .kiro ? "Kiro 接入说明" : "连接配置预览").font(.system(size: 14, weight: .semibold)); Spacer(); if tool != .kiro { Toggle("显示本地密钥", isOn: $visible).toggleStyle(.checkbox).font(.system(size: 11)) } }
-                    Text(visible ? profile.snippet : profile.snippet.replacingOccurrences(of: store.settings.clientKey, with: "••••••••（复制时包含完整密钥）"))
-                        .font(.system(size: 12, design: .monospaced)).textSelection(.enabled).lineSpacing(5)
-                        .padding(16).frame(maxWidth: .infinity, alignment: .leading).background(insetSurface, in: RoundedRectangle(cornerRadius: 10))
-                    if tool != .kiro {
-                        HStack {
-                            Button("复制配置") { store.copy(profile.snippet); message = "配置已复制，包含本地连接密钥。" }
-                            if tool == .claudeDesktop {
-                                Button("复制地址") { store.copy(store.baseURL); message = "网关地址已复制。" }
-                                Button("复制密钥") { store.copy(store.settings.clientKey); message = "本地连接密钥已复制。" }
-                                Button("复制模型 ID") { store.copy(model); message = "模型 ID 已复制。" }.disabled(model.isEmpty)
-                            }
-                            if !profile.command.isEmpty { Button(tool == .kimi ? "复制启动命令（先应用配置）" : "复制临时启动命令") { store.copy(profile.command); message = "启动命令已复制。" } }
-                            Spacer()
-                            if tool.file != nil { Button("应用到工具") { confirmingApply = true }.buttonStyle(WorkspaceButtonStyle(prominent: true)).disabled(model.isEmpty || filePath.isEmpty || !store.running) }
-                        }
-                        HStack { Button("导出配置文件") { exportProfile() }; if tool.file != nil { Button("恢复上一次配置") { confirmingRestore = true } }; Spacer() }
-                    }
-                    if !message.isEmpty { Text(message).font(.system(size: 12)).foregroundStyle(accent).textSelection(.enabled) }
-                }
-            }
-            }
-        }.onAppear { resetPath(); model = store.settings.selectedModels[tool.rawValue] ?? "" }
-            .confirmationDialog("将应用连接配置，并备份目标文件。", isPresented: $confirmingApply) {
-                Button("备份并应用") { apply() }
-            } message: { Text(filePath + "\n模型 · " + model) }
-            .confirmationDialog("恢复本工具上一次应用之前的配置？", isPresented: $confirmingRestore) {
-                Button("恢复配置") {
-                    do { try ConfigurationInstaller(directory: store.dataDirectory).restore(URL(fileURLWithPath: filePath)); message = "已恢复上一次配置。"; store.record("已恢复 \(tool.rawValue) 配置") }
-                    catch { store.report(error) }
-                }
-            }
+        }
     }
+
+    private func hint(_ item: ClientTool) -> String? {
+        switch item {
+        case .cursor: return "反代 / 官方账号"
+        case .claudeDesktop: return "桌面端 · Chat / Cowork"
+        case .claude, .codex, .kimi: return "可直接写入配置"
+        case .kiro: return "查看接入说明"
+        default: return "手动粘贴配置"
+        }
+    }
+
+    private var statusCard: some View {
+        Card(padding: 20) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack { Text("状态").sectionTitle(); Spacer() }
+                HStack(spacing: 8) {
+                    Circle().fill(store.running ? healthy : warning).frame(width: 7, height: 7)
+                    Text(store.running ? "本机服务运行中 · " + store.baseURL : "服务未运行，工具暂时无法连接").font(.system(size: 12))
+                    Spacer()
+                    if !store.running { Button("启动服务") { Task { await store.start() } }.disabled(store.busy) }
+                }
+                if let saved = store.settings.selectedModels[tool.rawValue] {
+                    Text("上次应用的模型 · " + saved).monoSmall().foregroundStyle(mutedInk).textSelection(.enabled)
+                } else if tool.file != nil {
+                    Text("尚未通过 BridgeDock 应用配置。").captionText()
+                }
+            }
+        }
+    }
+
+    private var modelCard: some View {
+        Card(padding: 20) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack { Text("模型").sectionTitle(); Spacer(); Pill(text: "每个工具独立配置", active: false) }
+                HStack {
+                    TextField("填写已开放的模型名", text: $model).textFieldStyle(.roundedBorder).monoSmall(12)
+                    Menu("从目录选择") { ForEach(store.models) { item in Button(item.id) { model = item.id } } }
+                        .disabled(store.models.isEmpty).frame(width: 130)
+                }
+                if store.models.isEmpty { Text("尚未发布模型，点击顶栏「模型」勾选后可从目录选择。").captionText() }
+                if tool == .kimi { TextField("模型上下文长度（按服务商填写）", text: $context).textFieldStyle(.roundedBorder) }
+            }
+        }
+    }
+
+    private var steps: [String] {
+        if tool.file != nil {
+            return ["在上方选择模型，确认下方配置文件路径。",
+                    "点击「应用到工具」，BridgeDock 会先备份现有文件，再合并模型连接字段。",
+                    "重新启动 \(tool.rawValue) 的会话。项目级配置或终端环境变量可能优先于此配置。"]
+        }
+        if tool == .claudeDesktop {
+            return ["在 Claude 中打开 Help → Troubleshooting → Enable Developer Mode，然后重启。",
+                    "选择 Developer → Configure Third-Party Inference，选择 Gateway 与 Static API key。",
+                    "填入下方网关地址、本地密钥和模型 ID，测试连接并应用，再重启 Claude。",
+                    "建议先在「模型与测试」中用 Anthropic Messages 协议验证模型。"]
+        }
+        if tool == .kiro { return [] }
+        return ["在目标工具的模型服务商设置中新增 OpenAI 兼容服务商。", "粘贴下方地址、密钥和模型名，保存后刷新模型列表。"]
+    }
+
+    private var connectionCard: some View {
+        Card(padding: 20) {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Text(tool == .kiro ? "Kiro 接入说明" : "连接配置").sectionTitle()
+                    Spacer()
+                    if tool != .kiro { Toggle("显示本地密钥", isOn: $visible).toggleStyle(.checkbox).font(.system(size: 11)) }
+                }
+                if !steps.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
+                            HStack(alignment: .top, spacing: 8) {
+                                Text("\(index + 1)").font(.system(size: 10, weight: .semibold)).foregroundStyle(accent)
+                                    .frame(width: 18, height: 18).background(accent.opacity(0.1), in: Circle())
+                                Text(step).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                }
+                if tool.file != nil {
+                    HStack { TextField("配置文件", text: $filePath).textFieldStyle(.roundedBorder).monoSmall(); Button("选择文件") { chooseFile() } }
+                }
+                if tool == .claudeDesktop {
+                    HStack {
+                        Button("打开 Claude") { Task { await store.openClaudeDesktop() } }.disabled(store.launchingAgent || store.busy)
+                        Link("官方配置说明", destination: URL(string: "https://claude.com/docs/third-party/claude-desktop/gateway")!).font(.system(size: 12))
+                    }
+                }
+                Text(visible ? profile.snippet : profile.snippet.replacingOccurrences(of: store.settings.clientKey, with: "••••••••（复制时包含完整密钥）"))
+                    .monoSmall(12).textSelection(.enabled).lineSpacing(5)
+                    .padding(14).frame(maxWidth: .infinity, alignment: .leading).background(insetSurface, in: RoundedRectangle(cornerRadius: 10))
+                if tool != .kiro { actions }
+                if !message.isEmpty { NoticeBanner(text: message, tone: messageTone) }
+            }
+        }
+    }
+
+    private var actions: some View {
+        HStack(spacing: 10) {
+            Menu("更多") {
+                Button("复制配置") { store.copy(profile.snippet); notify("配置已复制，包含本地连接密钥。") }
+                if tool == .claudeDesktop {
+                    Button("复制地址") { store.copy(store.baseURL); notify("网关地址已复制。") }
+                    Button("复制密钥") { store.copy(store.settings.clientKey); notify("本地连接密钥已复制。") }
+                    Button("复制模型 ID") { store.copy(model); notify("模型 ID 已复制。") }.disabled(model.isEmpty)
+                }
+                if !profile.command.isEmpty {
+                    Button(tool == .kimi ? "复制启动命令（先应用配置）" : "复制临时启动命令") { store.copy(profile.command); notify("启动命令已复制。") }
+                }
+                Divider()
+                Button("导出配置文件…") { exportProfile() }
+                if tool.file != nil { Button("恢复上一次配置…") { confirmingRestore = true } }
+            }.menuStyle(.borderlessButton).fixedSize()
+            Spacer()
+            if tool.file != nil {
+                if let blocker = applyBlocker { Text(blocker).captionText() }
+                Button("应用到工具") { confirmingApply = true }
+                    .buttonStyle(WorkspaceButtonStyle(prominent: true)).disabled(applyBlocker != nil)
+            } else {
+                Button("复制配置") { store.copy(profile.snippet); notify("配置已复制，包含本地连接密钥。") }
+                    .buttonStyle(WorkspaceButtonStyle(prominent: true))
+            }
+        }
+    }
+
+    private func select(_ item: ClientTool) {
+        tool = item; message = ""; resetPath(); model = store.settings.selectedModels[item.rawValue] ?? ""
+    }
+    private func notify(_ text: String, _ tone: NoticeTone = .success) { message = text; messageTone = tone }
     private func resetPath() {
         filePath = tool.file.map { FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent($0).path } ?? ""
         if tool == .kimi { context = String(BridgeStore.managedContextSize(at: URL(fileURLWithPath: filePath)) ?? 32768) }
@@ -1487,18 +2039,19 @@ struct ClientsView: View {
         do {
             guard filePath.hasPrefix("/") else { throw BridgeError.message("请填写完整的绝对路径。") }
             try ConfigurationInstaller(directory: store.dataDirectory).apply(profile, to: URL(fileURLWithPath: filePath))
-            message = "已备份并应用。请重新启动 \(tool.rawValue) 的会话。"
+            notify("已备份并应用。请重新启动 \(tool.rawValue) 的会话。")
             store.record("已应用 \(tool.rawValue) 配置 · \(model)")
             var next = store.settings; next.selectedModels[tool.rawValue] = model
             Task { do { try await store.update(next) } catch { store.report(error) } }
-        } catch { store.report(error) }
+        } catch { notify(store.redacted(error.localizedDescription), .failure); store.report(error) }
     }
     private func exportProfile() {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = tool == .claude ? "bridgedock-claude.json" : "bridgedock-\(tool.id).txt"
         if [.codex, .kimi].contains(tool) { panel.nameFieldStringValue = "bridgedock-\(tool.id).toml" }
         if panel.runModal() == .OK, let url = panel.url {
-            do { try privateWrite(Data(profile.snippet.utf8), to: url); message = "已导出，文件包含本地连接密钥。" } catch { store.report(error) }
+            do { try privateWrite(Data(profile.snippet.utf8), to: url); notify("已导出，文件包含本地连接密钥。") }
+            catch { notify(store.redacted(error.localizedDescription), .failure); store.report(error) }
         }
     }
 }
@@ -1538,7 +2091,7 @@ struct CursorLocalView: View {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("在 Cursor 中调整模型参数").font(.system(size: 13, weight: .medium))
-                        Text("开启后点击 Cursor 模型菜单右侧的“参数”，调整“上下文预算”和“思考深度”。预算按档位选择，上限仍由上游模型决定。")
+                        Text("开启后点击 Cursor 输入框中的模型按钮，直接调整当前渠道支持的参数。Cursor 账号模型沿用官方档位，其他渠道显示思考档位和上下文预算。")
                             .font(.system(size: 11)).foregroundStyle(mutedInk)
                     }
                     Spacer()
@@ -1551,7 +2104,6 @@ struct CursorLocalView: View {
                     Text("切换时会正常重启 Cursor。如出现保存提示，请在 Cursor 中处理。")
                         .font(.system(size: 10)).foregroundStyle(mutedInk)
                     Spacer()
-                    ModelPublicationButton(title: "选择反代模型")
                     Button("打开 Cursor 主窗口") { Task { await store.openCursorWindow() } }
                         .buttonStyle(WorkspaceButtonStyle(prominent: true)).disabled(store.cursorBusy || store.busy || store.launchingAgent)
                 }
@@ -1594,10 +2146,24 @@ struct SettingsView: View {
             }
             Card {
                 VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Text("中转站一键导入").font(.system(size: 14, weight: .semibold))
+                        Spacer()
+                        Toggle("接管 CC Switch 导入链接", isOn: Binding(get: { store.settings.handlesImportLinks }, set: { enabled in
+                            Task { await store.setHandlesImportLinks(enabled) }
+                        })).toggleStyle(.switch).disabled(store.busy)
+                    }
+                    Text("Sub2API、New API 等中转站的令牌页有“导入 CC Switch”按钮。开启后点击该按钮，BridgeDock 自动识别地址、Key、协议和模型，直接存成 API 渠道，经本地反代使用，并记住中转站后台地址。识别不全时才打开编辑器补充。")
+                        .font(.system(size: 12)).foregroundStyle(mutedInk).lineSpacing(5)
+                    Text(store.importLinkStatus).font(.system(size: 11)).foregroundStyle(mutedInk).textSelection(.enabled)
+                }
+            }.onAppear { store.refreshImportLinkStatus() }
+            Card {
+                VStack(alignment: .leading, spacing: 12) {
                     Text("本地数据与内核").font(.system(size: 14, weight: .semibold))
                     Text(store.dataDirectory.path).font(.system(size: 11, design: .monospaced)).textSelection(.enabled).foregroundStyle(mutedInk)
                     Text("API Key 和订阅凭据以本地文件保存，数据目录仅当前用户可读写。配置导出会包含本地连接密钥。关闭窗口后服务继续运行，可从菜单栏返回；退出 App 时停止内核。").font(.system(size: 12)).foregroundStyle(mutedInk).lineSpacing(5)
-                    HStack { Pill(text: "CLIProxyAPI 8.0.51", active: false); Pill(text: "Kiro Plugin 0.1.1", active: false); Pill(text: "MIT", active: false) }
+                    HStack { Pill(text: "CLIProxyAPI 8.0.53", active: false); Pill(text: "Kiro Plugin 0.1.1", active: false); Pill(text: "kiro2cc 3.5.1", active: false); Pill(text: "MIT", active: false) }
                 }
             }
             Card {

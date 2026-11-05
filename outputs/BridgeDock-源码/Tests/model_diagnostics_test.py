@@ -29,6 +29,13 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"not a model response")
             return
+        if model.startswith("thinking-"):
+            assert body["thinking"]["type"] == "adaptive" and body["output_config"]["effort"] == "high"
+            content = [{"type": "text", "text": "推理过程略。\n{\"answer\": 21}"}]
+            if model == "thinking-signed":
+                content.insert(0, {"type": "thinking", "thinking": "...", "signature": "S" * 400})
+            self.send_json(200, {"model": "upstream-fixture", "content": content, "stop_reason": "end_turn"})
+            return
         text = "" if model == "empty" else ("wrong" if model == "wrong-marker" else "BD_FIXTURE")
         if not body["stream"]:
             value = {"model": "upstream-fixture"}

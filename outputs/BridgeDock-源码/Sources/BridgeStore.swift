@@ -15,6 +15,8 @@ final class BridgeStore: ObservableObject {
     private var modelDefinitions: [String: [String: ModelCapability]] = [:]
     private var modelDefinitionKey = ""
     private var modelDefinitionsLoadedAt = Date.distantPast
+    private var cursorModelCatalogs: [String: CursorModelCatalog] = [:]
+    private var cursorCatalogAttempts: [String: Date] = [:]
     var modelOwners: [String] { Array(Set(rawModels.map(\.owner))) }
     var capabilityBackfillAttempted: Set<String> = []
     private let modelGateway = ModelGateway()
@@ -25,13 +27,18 @@ final class BridgeStore: ObservableObject {
     @Published private(set) var callbackSubmission: UUID?
     @Published var localSubscriptionStatus: [String: String] = [:]
     @Published var accountOperation: String?
-    @Published var kimiWorkStatus = "请先在本机 Kimi 桌面端登录 Work，再连接此通道。"
+    @Published var kimiWorkStatus = "在 BridgeDock 中网页登录，无需安装或运行 Kimi 客户端。"
     var workAppliedFingerprint = ""
     var workSyncing = false
+    var workRefreshAttempts: [String: Date] = [:]
     @Published var testResult = ""
     @Published var testing = false
     @Published var testReport: ModelTestReport?
     private var modelTestTask: Task<Void, Never>?
+    @Published var pendingImport: ChannelImport?
+    @Published var importLinkStatus = ""
+    @Published var importNotice = ""
+    var openMainWindow: (() -> Void)?
     @Published var quotaStates: [String: QuotaState] = [:]
     @Published var quotaRefreshing = false
     @Published var launchingAgent = false
@@ -43,6 +50,16 @@ final class BridgeStore: ObservableObject {
     @Published var cursorStatus = "已关闭 · Cursor 使用原来的官方账号"
     @Published var cursorSessionReady = false
     let cursorSession = CursorSessionServer()
+    @Published var kiroStreaming = false
+    private(set) lazy var kiroRuntime: KiroRuntime = {
+        let runtime = KiroRuntime(dataDirectory: dataDirectory)
+        runtime.onReadyChange = { [weak self, unowned runtime] ready in
+            guard let self else { return }
+            self.kiroStreaming = ready
+            self.modelGateway.updateKiro(ready ? KiroGatewayRoute(port: KiroRuntime.port, keys: runtime.keys, pooledPrefixes: runtime.pooledPrefixes) : nil)
+        }
+        return runtime
+    }()
     let dataDirectory: URL
     private let stateURL: URL
     private let configURL: URL
@@ -62,8 +79,7 @@ final class BridgeStore: ObservableObject {
     var coreURL: URL { Bundle.main.resourceURL!.appendingPathComponent("cli-proxy-api") }
 
     init() {
-        let override = ProcessInfo.processInfo.environment["BRIDGEDOCK_DATA_DIR"]
-        dataDirectory = override.map { URL(fileURLWithPath: $0) } ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("BridgeDock")
+        dataDirectory = AppInstanceLock.dataDirectory
         stateURL = dataDirectory.appendingPathComponent("state.json")
         configURL = dataDirectory.appendingPathComponent("config.yaml")
         pluginDirectory = dataDirectory.appendingPathComponent("plugins")
@@ -76,6 +92,8 @@ final class BridgeStore: ObservableObject {
             try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dataDirectory.path)
             if FileManager.default.fileExists(atPath: stateURL.path) {
                 settings = try JSONDecoder().decode(AppSettings.self, from: Data(contentsOf: stateURL))
+                _ = ModelPublishing.migrateStoredIDs(&settings)
+                settings = migrateKimiWork(settings)
                 try persist(settings) // Persist newly migrated private core credentials once.
             } else {
                 try persist(settings)
@@ -154,6 +172,11 @@ final class BridgeStore: ObservableObject {
         await exitTask?.value
         exitTask = nil
         do {
+            // Reserve the public port before reconnecting to a core or touching
+            // shared runtimes. A port conflict must leave the existing service alone.
+            modelGateway.update(port: settings.port, corePort: settings.corePort, clientKey: settings.clientKey,
+                                coreKey: settings.coreClientKey, catalog: availableModels, coreModels: rawModels.map(\.id))
+            try await modelGateway.start()
             // A previous app crash can leave its child alive. Only reconnect to a
             // server authenticated with this installation's private management key.
             if let _ = try? await request("/v8/management/config", timeout: 1) {
@@ -163,7 +186,6 @@ final class BridgeStore: ObservableObject {
                 record("重新连接已有的 BridgeDock 本地服务")
                 beginRefreshing()
                 await refresh()
-                try await modelGateway.start()
                 await startCursorSession()
                 return
             }
@@ -189,6 +211,7 @@ final class BridgeStore: ObservableObject {
                     guard let self, self.core === exited else { return }
                     self.running = false
                     self.modelGateway.stop()
+                    self.kiroRuntime.stop()
                     self.cursorSession.stop()
                     self.cursorSessionReady = false
                     if self.cursorIdentity.enabled { self.cursorStatus = "BD 反代已暂停 · 等待服务启动" }
@@ -214,10 +237,10 @@ final class BridgeStore: ObservableObject {
             record("反代已启动 · 127.0.0.1:\(settings.port)")
             beginRefreshing()
             await refresh()
-            try await modelGateway.start()
             await startCursorSession()
         } catch {
             modelGateway.stop()
+            kiroRuntime.stop()
             refreshTask?.cancel()
             cursorSession.stop()
             cursorSessionReady = false
@@ -235,6 +258,7 @@ final class BridgeStore: ObservableObject {
         quotaGeneration += 1
         for id in quotaStates.keys { quotaStates[id]?.loading = false }
         modelGateway.stop()
+        kiroRuntime.stop()
         cursorSession.stop()
         cursorSessionReady = false
         if cursorIdentity.enabled { cursorStatus = "BD 反代已暂停 · 等待服务启动" }
@@ -414,8 +438,10 @@ final class BridgeStore: ObservableObject {
                 modelDefinitionKey = definitionKey
                 modelDefinitionsLoadedAt = Date()
             }
+            await loadCursorModelCatalogs()
             refreshPublishedCatalog()
             status = "本地服务运行中"
+            await kiroRuntime.synchronize(proxyURL: settings.proxyURL)
             if cursorIdentity.enabled {
                 try cursorSession.update(identity: cursorIdentity, apiURL: apiURL, key: settings.clientKey,
                                          model: settings.selectedModels["Cursor"] ?? models.first?.id ?? "")
@@ -427,21 +453,82 @@ final class BridgeStore: ObservableObject {
         }
     }
 
+    private func loadCursorModelCatalogs() async {
+        let eligible = accounts.filter {
+            $0.provider == CursorAccountProfile.providerID && $0.runtimeProfile != CursorAccountProfile.grokBot.rawValue
+                && !$0.disabled && !$0.requiresSignIn && !$0.prefix.isEmpty
+        }
+        let names = Set(eligible.map(\.name))
+        cursorModelCatalogs = cursorModelCatalogs.filter { names.contains($0.key) }
+        cursorCatalogAttempts = cursorCatalogAttempts.filter { names.contains($0.key) }
+        for account in eligible {
+            guard Date().timeIntervalSince(cursorCatalogAttempts[account.name] ?? .distantPast) >= 300 else { continue }
+            cursorCatalogAttempts[account.name] = Date()
+            do {
+                let data = try await request("/v8/management/credentials/download?name=" + Self.query(account.name), timeout: 10)
+                guard let credential = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let token = credential["access_token"] as? String, !token.isEmpty else { continue }
+                let payload = try jsonData(["includeLongContextModels": true, "useModelParameters": true,
+                                           "doNotUseMarkdown": true, "useCloudAgentEffortModes": true])
+                let response = try await object("/v8/management/requests/api-call", method: "POST", value: [
+                    "method": "POST", "url": "https://api2.cursor.sh/aiserver.v1.AiService/AvailableModels",
+                    "proxy_url": credential["proxy_url"] as? String ?? "",
+                    "header": ["Authorization": "Bearer " + token, "Content-Type": "application/json",
+                               "Connect-Protocol-Version": "1", "X-Cursor-Client-Type": "cli", "X-Ghost-Mode": "true",
+                               "X-Cursor-Client-Version": credential["client_version"] as? String ?? "cli-2026.10.22-27dcf5f"],
+                    "data": String(decoding: payload, as: UTF8.self)
+                ])
+                guard response["status_code"] as? Int == 200,
+                      let body = response["body"] as? String, body.utf8.count <= 4_000_000 else { continue }
+                let catalog = try JSONDecoder().decode(CursorModelCatalog.self, from: Data(body.utf8))
+                guard accounts.contains(where: { $0.name == account.name && !$0.disabled }) else { continue }
+                cursorModelCatalogs[account.name] = catalog
+            } catch {
+                record("Cursor 模型参数暂时无法更新，将在下次刷新时重试。", failed: true)
+            }
+        }
+    }
+
     private func refreshPublishedCatalog() {
         let previous = availableModels
-        availableModels = ModelPublishing.catalog(rawModels: rawModels, settings: settings, accounts: accounts, definitions: modelDefinitions)
-        models = availableModels.filter(\.isEnabled).map { ModelItem(id: $0.publicID, owner: $0.sourceName) }
+        var cursorRoutes: [String: CursorModelRoute] = [:]
+        let availableIDs = Set(rawModels.filter { $0.owner.caseInsensitiveCompare(CursorAccountProfile.providerID) == .orderedSame }.map(\.id))
+        for account in accounts where !account.disabled && !account.prefix.isEmpty {
+            if let catalog = cursorModelCatalogs[account.name] {
+                cursorRoutes.merge(catalog.routes(prefix: account.prefix, availableModelIDs: availableIDs)) { current, _ in current }
+            }
+            // The catalog endpoint is optional and has returned several
+            // incompatible field shapes over Cursor releases.  Infer routes
+            // from the model slugs already registered by the core so the
+            // account still gets a standard picker instead of raw suffixes.
+            cursorRoutes.merge(CursorModelCatalog.inferredRoutes(prefix: account.prefix, availableModelIDs: availableIDs)) { current, _ in current }
+        }
+        availableModels = ModelPublishing.catalog(rawModels: rawModels, settings: settings, accounts: accounts,
+                                                  definitions: modelDefinitions, cursorRoutes: cursorRoutes)
+        if ModelPublishing.migrateStoredIDs(&settings, catalog: availableModels) {
+            availableModels = ModelPublishing.catalog(rawModels: rawModels, settings: settings, accounts: accounts,
+                                                      definitions: modelDefinitions, cursorRoutes: cursorRoutes)
+            try? persist(settings)
+        }
+        var seen: Set<String> = []
+        models = availableModels.filter { $0.isEnabled && seen.insert($0.publicID).inserted }.map { model in
+            ModelItem(id: model.publicID, owner: providers(for: model.publicID).map(\.name).joined(separator: " / "))
+        }
         for (tool, selected) in settings.selectedModels {
             if models.contains(where: { $0.id == selected }) { continue }
             let rawID = previous.first(where: { $0.publicID == selected })?.id ?? selected
-            settings.selectedModels[tool] = availableModels.first(where: { $0.id == rawID && $0.isEnabled })?.publicID
+            settings.selectedModels[tool] = availableModels.first(where: { ($0.id == rawID || $0.publicID == selected) && $0.isEnabled })?.publicID
         }
         modelGateway.update(port: settings.port, corePort: settings.corePort, clientKey: settings.clientKey,
                             coreKey: settings.coreClientKey, catalog: availableModels, coreModels: rawModels.map(\.id))
     }
 
-    func publicPrefix(source: String) -> String? {
-        availableModels.first { $0.sourceID == source }?.publicID.split(separator: "/", maxSplits: 1).first.map(String.init)
+    /// 公开 ID 不再带渠道前缀，界面改为显示渠道自身的路由前缀。
+    func publicPrefix(source: String) -> String? { nil }
+
+    /// 按公开 ID 查合并后的供应商（第一个为默认），含各自的 key、名称与能力。
+    func providers(for publicID: String) -> [ModelPublishing.Provider] {
+        ModelPublishing.providers(in: availableModels, publicID: publicID)
     }
 
     func savePublishedModels(_ ids: Set<String>) async throws {
@@ -630,27 +717,67 @@ final class BridgeStore: ObservableObject {
         return AccountOptions(account: account, document: value)
     }
 
-    func addCursorAccount(label: String, key: String, profile: CursorAccountProfile = .cursor) async throws {
+    func addCursorAccount(label: String, key: String, profile: CursorAccountProfile = .cursor, proxyURL: String = "") async throws {
         guard running, !busy, accountOperation == nil else { throw BridgeError.message("请启动本地服务并等待当前操作完成。") }
         var credential = try profile.credential(label: label, key: key, prefix: "")
         busy = true
         defer { busy = false }
         let normalizedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        let digest = ConfigurationInstaller(directory: dataDirectory).digest(Data(normalizedKey.utf8))
+        let pastedSession = CursorSessionCredential.recognizes(normalizedKey) ? try CursorSessionCredential(normalizedKey) : nil
+        let digest = ConfigurationInstaller(directory: dataDirectory).digest(Data((pastedSession?.subject ?? normalizedKey).utf8))
         let name = profile.filename(digest: digest)
-        guard !accounts.contains(where: { $0.name == name }),
-              !FileManager.default.fileExists(atPath: dataDirectory.appendingPathComponent("accounts/" + name).path) else {
-            throw BridgeError.message("这个 Key 已接入 \(profile.title) 通道，请在现有账号中修改设置。")
+        var previous: [String: Any]?
+        if accounts.contains(where: { $0.name == name }) || FileManager.default.fileExists(atPath: dataDirectory.appendingPathComponent("accounts/" + name).path) {
+            guard let pastedSession else {
+                throw BridgeError.message("这个账号已接入 \(profile.title) 通道，请在现有账号中修改设置。")
+            }
+            let data = try await request("/v8/management/credentials/download?name=" + Self.query(name))
+            guard let existing = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  existing["auth_method"] as? String == "session",
+                  existing["account_id"] as? String == pastedSession.subject else {
+                throw BridgeError.message("现有账号身份不匹配，未覆盖原凭据。")
+            }
+            previous = existing
         }
-        var occupied = Set(settings.channels.map(\.prefix))
-        for account in accounts {
-            let options = try await loadAccountOptions(account)
-            if !options.prefix.isEmpty { occupied.insert(options.prefix) }
+        let effectiveProxy = previous?["proxy_url"] as? String ?? proxyURL
+        try validateProxyURL(effectiveProxy)
+        if let pastedSession {
+            // Only the fixed official endpoint receives the pasted cookie. Do not
+            // display an upstream body, which could echo authentication headers.
+            let result: [String: Any]
+            do {
+                result = try await object("/v8/management/requests/api-call", method: "POST", value: [
+                    "method": "GET", "url": "https://cursor.com/api/auth/me", "proxy_url": effectiveProxy,
+                    "header": ["Cookie": pastedSession.cookie, "Accept": "application/json"]
+                ])
+            } catch { throw BridgeError.message("无法连接 Cursor 验证账号，请检查网络或代理后重试。") }
+            guard let status = result["status_code"] as? Int, status == 200 else {
+                throw BridgeError.message("Cursor 未接受这份会话凭据，请重新登录后复制，或检查出站代理。")
+            }
+            guard let body = result["body"] as? String, let bytes = body.data(using: .utf8),
+                  let identity = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] else {
+                throw BridgeError.message("Cursor 账号验证响应格式无效，请稍后重试。")
+            }
+            credential["email"] = try pastedSession.verifiedEmail(identity)
+            credential["last_refresh"] = ISO8601DateFormatter().string(from: Date())
         }
-        credential["prefix"] = LocalSubscriptionIdentity.prefix(provider: profile.prefix, occupied: occupied)
+        if var previous {
+            // Re-pasting a renewed session updates authentication only. Preserve
+            // the account's routing, note, proxy and intentional disabled state.
+            for field in ["access_token", "email", "expired", "last_refresh"] { previous[field] = credential[field] }
+            credential = previous
+        } else {
+            credential["proxy_url"] = effectiveProxy
+            var occupied = Set(settings.channels.map(\.prefix))
+            for account in accounts {
+                let options = try await loadAccountOptions(account)
+                if !options.prefix.isEmpty { occupied.insert(options.prefix) }
+            }
+            credential["prefix"] = LocalSubscriptionIdentity.prefix(provider: profile.prefix, occupied: occupied)
+        }
         let data = try jsonData(credential)
         _ = try await request("/v8/management/credentials?name=" + Self.query(name), method: "POST", body: data)
-        record("已添加 \(profile.title) 通道 · Cursor 账号")
+        record(previous == nil ? "已添加 \(profile.title) 通道 · Cursor 账号" : "已更新 \(profile.title) 会话凭据 · 保留原账号设置")
         await refresh()
     }
 
@@ -746,36 +873,41 @@ final class BridgeStore: ObservableObject {
         }
     }
 
-    func startModelTest(_ model: String, wire: String, mode: ModelTestMode) {
+    /// provider 为 `providers(for:)` 返回的 key；nil 时网关选默认供应商。
+    func startModelTest(_ model: String, wire: String, mode: ModelTestMode, effort: ModelReasoningEffort = .unset, provider: String? = nil) {
         guard running, !model.isEmpty, !testing, modelTestTask == nil else { return }
-        modelTestTask = Task { await testModel(model, wire: wire, mode: mode) }
+        modelTestTask = Task { await testModel(model, wire: wire, mode: mode, effort: effort, provider: provider) }
     }
 
     func cancelModelTest() {
         modelTestTask?.cancel()
     }
 
-    func testModel(_ model: String, wire: String = "chat", mode: ModelTestMode = .quick) async {
+    func testModel(_ model: String, wire: String = "chat", mode: ModelTestMode = .quick, effort: ModelReasoningEffort = .unset,
+                   provider: String? = nil) async {
         guard running, !testing, !model.isEmpty else { return }
         testing = true
         defer { testing = false; modelTestTask = nil }
-        let probes = ModelTestProbe.make(for: mode)
-        let route = ModelRouteExpectation(model: model, catalog: availableModels, settings: settings)
-        var report = ModelTestReport(mode: mode, model: model, wire: wire, route: route, plannedCount: probes.count)
+        let chosen = providers(for: model).first { $0.key == provider } ?? providers(for: model).first
+        let probes = ModelTestProbe.make(for: mode, contextLimit: chosen?.capability?.contextLength)
+        let route = ModelRouteExpectation(model: model, catalog: availableModels, settings: settings,
+                                          effort: mode == .reasoning && effort != .unset ? effort.rawValue : nil, provider: provider)
+        var report = ModelTestReport(mode: mode, model: model, wire: wire, effort: effort, route: route, plannedCount: probes.count)
         // Keep the endpoint and key consistent for every sample in this run.
         let endpoint = URL(string: baseURL)!
         let key = settings.clientKey
+        var thinking = AnthropicThinkingStyle.adaptive
         testReport = report
         for (index, probe) in probes.enumerated() {
             if Task.isCancelled { break }
             testResult = "正在测试 \(index + 1) / \(probes.count) · \(probe.title)"
-            var sample: ModelTestSample
-            do {
-                let request = try ModelTestHTTP.request(baseURL: endpoint, key: key, model: model, wire: wire,
-                                                        probe: probe, streaming: mode != .quick)
-                sample = await ModelTestHTTP.perform(request, probe: probe, index: index)
-            } catch {
-                sample = ModelTestSample(id: index, probe: probe, error: error.localizedDescription)
+            var sample = await modelTestSample(endpoint: endpoint, key: key, model: model, wire: wire, mode: mode,
+                                               probe: probe, index: index, effort: effort, thinking: thinking, provider: provider)
+            // Older Claude models reject adaptive thinking; fall back to budget thinking once and keep it for the run.
+            if wire == "anthropic", probe.usesEffort, thinking == .adaptive, sample.httpStatus == 400, !Task.isCancelled {
+                thinking = .budget
+                sample = await modelTestSample(endpoint: endpoint, key: key, model: model, wire: wire, mode: mode,
+                                               probe: probe, index: index, effort: effort, thinking: thinking, provider: provider)
             }
             if Task.isCancelled { break }
             sample.error = sample.error.map(redacted)
@@ -783,12 +915,41 @@ final class BridgeStore: ObservableObject {
             sample.returnedModels = sample.returnedModels.map(redacted)
             report.samples.append(sample)
             testReport = report
+            if mode.stopsOnFailure, !sample.succeeded || sample.answerCorrect == false { break }
         }
         report.finished = true
         report.cancelled = Task.isCancelled
         testReport = report
         testResult = report.cancelled ? "测试已取消，保留已完成的结果。" : "测试完成 · 成功 \(report.successful) / \(report.samples.count) 次"
+        if mode == .longContext, !report.cancelled, let chosen, chosen.model.cursorRoute == nil, chosen.model.workModel == nil {
+            await recordVerifiedContexts(report, routeID: chosen.model.id)
+        }
         record("\(mode.title) · \(model) · \(testResult)", failed: !report.cancelled && report.successful < report.samples.count)
+    }
+
+    /// 只记录实测取回全部埋点的档位；之后 Cursor 菜单的上下文选项即为这些档位。
+    private func recordVerifiedContexts(_ result: ModelTestReport, routeID: String) async {
+        let passed = result.samples.filter { $0.succeeded && $0.answerCorrect == true }.compactMap(\.probe.contextTier).sorted()
+        var next = settings
+        next.verifiedContexts[routeID] = passed.isEmpty ? nil : passed
+        guard next.verifiedContexts != settings.verifiedContexts else { return }
+        do {
+            try await update(next)
+            let labels = passed.map(ModelPublishing.tokenLabel).joined(separator: " / ")
+            record("已按长上下文检测记录 \(result.model) 的上下文档位 · " + (labels.isEmpty ? "无通过档位" : labels))
+        } catch { report(error) }
+    }
+
+    private func modelTestSample(endpoint: URL, key: String, model: String, wire: String, mode: ModelTestMode, probe: ModelTestProbe,
+                                 index: Int, effort: ModelReasoningEffort, thinking: AnthropicThinkingStyle,
+                                 provider: String? = nil) async -> ModelTestSample {
+        do {
+            let request = try ModelTestHTTP.request(baseURL: endpoint, key: key, model: model, wire: wire, probe: probe,
+                                                    streaming: mode.streaming, effort: effort, thinking: thinking, provider: provider)
+            return await ModelTestHTTP.perform(request, probe: probe, index: index)
+        } catch {
+            return ModelTestSample(id: index, probe: probe, error: error.localizedDescription)
+        }
     }
 
     func copy(_ text: String) {

@@ -1,4 +1,4 @@
-BridgeDock 桥接台 1.0
+BridgeDock 桥接台 1.4.0
 
 面向 Apple Silicon Mac 的本地模型反代桌面应用。
 界面使用 SwiftUI，内置 CLIProxyAPI 8.0.51 与 Kiro Plugin 0.1.1。
@@ -13,6 +13,7 @@ BridgeDock 桥接台 1.0
 • 流式输出与工具调用由反代内核进行协议转换。
 • 渠道独立前缀与模型别名，多渠道同名模型可分别选择。
 • 真实模型列表获取、三种协议的手动测试。
+• Claude 桌面端独立入口、第三方推理网关配置指引及连接信息复制。
 • Claude Code、Codex CLI、Kimi Code 配置合并、自动备份和恢复。
 • ZCode 和其他支持自定义 API 的工具可复制连接信息手动接入。
 • 本机监听、独立管理密钥、菜单栏启停、全局与渠道级出站代理。
@@ -21,7 +22,7 @@ BridgeDock 桥接台 1.0
 
 1. 双击 BridgeDock.app，确认左下角显示服务已启动。
 2. API 渠道中选择服务商，填写 Key，获取模型或手动填写模型 ID，再保存。
-   模型列表每行一个，也可以写成“上游模型ID = 别名”。调用名为“前缀/别名”。
+   模型列表每行一个，也可以写成“上游模型ID = 别名”。对外调用名为“渠道名称前四字/别名”。
 3. 订阅账号使用浏览器完成授权。密码、二次验证和授权由账号持有人操作。
 4. 在模型与测试页选择模型，测试需要的协议。真实测试会产生少量用量。
 5. 在工具接入页选择工具与模型，可复制启动命令、复制连接配置、导出文件，
@@ -53,6 +54,47 @@ API Key 使用工具接入页给出的本地密钥。
 • 模型上下文长度、图片能力、推理参数、额度和权限由上游决定。Kimi 预设
   上下文长度为 32768，可在接入页按所选模型调整。
 • 本次验收使用本地模拟接口。真实订阅授权、服务商网络和账号额度需添加后验证。
+
+首页 Agent 启动器
+
+在首页点击 Agent 图标，选择项目文件夹，再点“开始编辑”。
+成功启动后记住所选 Agent 和项目，下次打开 BridgeDock 自动恢复。
+Cursor 使用 Agents Window；Claude Code、Codex CLI、Kimi Code 在终端启动并接入 BD。
+Kimi Code 首次启动会备份并应用其连接配置。Kiro 和 ZCode 按其客户端现有配置启动。
+对应应用或 CLI 需要已经安装。
+
+余额与额度
+
+“余额与额度”按每个订阅账号、每个 API 渠道分别显示数据，支持搜索和手动刷新。
+代理运行时每 5 分钟自动查询，显示最近成功更新时间；刷新失败会保留上次数据并标出原因。
+支持 Claude、Codex、Kimi Code、Grok、Kiro 的可获取额度，以及 DeepSeek、Moonshot、
+智谱 / Z.ai Coding Plan、New API 类中转站。各接口实际返回的额度、赠金、积分、
+现金余额、周期和到期时间分别展示。缺少的数据不记作 0，也不混合不同货币。
+API 渠道可以选择余额查询类型，或设置同一域名下的自定义余额接口路径。
+New API 的令牌额度与账户额度分开显示；站内额度不会擅自换算成货币。
+OpenAI、Anthropic、xAI 等普通 API Key 未提供可用余额接口时会说明原因。
+查询仅使用只读接口；Grok 额度不可用时不会额外调用模型来探测。
+当前版本使用模拟响应验收，真实账号需要添加后验证其权限与接口可用性。
+
+Cursor 反代开关
+
+在“工具接入”顶部选择 Cursor，用“使用 BD 反代”开关切换：
+开启时，Cursor 主窗口使用 BridgeDock 中已接入的模型；关闭时，使用原来的 Cursor 官方账号。
+无需单独安装或恢复。首次开启由 BridgeDock 自动备份并适配 Cursor，当前支持 3.27.22。
+切换时会请求 Cursor 正常退出并重新打开。如出现保存提示，请在 Cursor 中完成保存。
+如果取消退出或适配失败，则保持原模式，不强制结束 Cursor。
+官方账号的登录凭据会保留；BD 模式前的模型列表与选择会保存，切回时恢复。
+旧版本已改动但没有留下快照的模型选择无法追溯，切回后由 Cursor 刷新官方模型。
+
+开启 BD 反代需要先在“订阅账号”或“API 渠道”中接入模型；开启时会自动启动本地服务。
+关闭此开关只切换 Cursor，不会停止其他工具正在使用的 BridgeDock 服务。
+关闭时，“打开 Cursor 主窗口”和首页打开项目均可直接使用官方模式。
+本地会话服务使用 127.0.0.1:18418，仅接受本机安装时生成的会话密钥。
+停止 BridgeDock 服务会暂停 BD 模式，新打开的窗口需在服务恢复后才能使用本地会话。
+Cursor 的官方云端功能和订阅权益仍由其官方账号提供。
+
+适配会保留已有汉化等其他修改，每次变更前的完整备份位于数据目录 cursor-backups。
+Cursor 更新后会重新检查兼容性；遇到不支持的版本会停止切换。
 
 数据与恢复
 
@@ -98,6 +140,7 @@ https://github.com/xiaokui-dev/cliproxyapi-kiro-plugin/releases/tag/v0.1.1
 适配参考
 
 https://learn.chatgpt.com/docs/config-file/config-advanced
+https://claude.com/docs/third-party/claude-desktop/gateway
 https://code.claude.com/docs/en/llm-gateway
 https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/config-files
 https://www.zcode.network/en/docs/configuration/
@@ -105,3 +148,54 @@ https://kiro.dev/docs/models/
 https://docs.bigmodel.cn/cn/coding-plan/tool/claude
 https://docs.x.ai/developers/rest-api-reference/inference/responses
 https://help.router-for.me/management/api
+
+额度与余额适配参考
+
+https://help.router-for.me/management/apiv8
+https://github.com/router-for-me/Cli-Proxy-API-Management-Center
+https://github.com/xiaokui-dev/cliproxyapi-kiro-plugin
+https://api-docs.deepseek.com/api/get-user-balance/
+https://github.com/zai-org/zai-coding-plugins
+https://docs.newapi.pro/en/docs/api/management/token-management/usage-token-get
+
+额度解析回归测试
+
+xcrun swiftc -O -swift-version 5 Sources/Models.swift Sources/Integrations.swift Sources/Quotas.swift Tests/QuotaTests.swift -o /tmp/bridgedock-quota-tests
+/tmp/bridgedock-quota-tests
+
+
+模型发布与 Cursor 参数（1.4.0）
+
+在“模型与测试”点击“选择反代模型”，可搜索渠道或模型、全选、清空，再保存选择。
+“工具接入 → Cursor”也有相同入口。只发布勾选的模型；未勾选的模型不会出现在
+/v1/models 中，手工填写模型 ID 也不能调用。API 渠道与订阅账号均适用。
+
+对外名称采用“渠道名称前四个字符/模型名或别名”，例如“我的渠道/gpt-model”。
+订阅账号采用账号备注（没有备注时用服务商名称）；前四字相同的渠道会添加稳定短标记。
+升级或修改渠道名称后，请刷新客户端模型列表，并更新手工保存的旧模型 ID。
+首次升级默认发布全部现有模型。第一次保存后使用固定选择，新发现的模型需要另行勾选；
+清空后保存会关闭全部模型的对外调用。已配置工具的 API 地址和本地 Key 保持原值。
+
+“工具接入 → Cursor → 在 Cursor 中调整模型参数”为独立开关。
+开启“使用 BD 反代”和参数开关后，在 Cursor 原生模型选择器中选择 BD 模型，
+即可调整“上下文预算”和“思考深度”。首次适配或改变参数开关会正常重启 Cursor；
+遇到保存提示请先保存，不会强制结束 Cursor。适配支持 Cursor 3.27.22。
+
+上下文预算按档位选择：8K、16K、32K、64K、128K、200K、256K、512K、1M、2M。
+如果上游目录提供了真实上限，选择会受该上限限制；没有提供上限时，手动选择只改变
+Cursor 的请求预算，不能扩大上游实际能力。请按服务商公布的限制选择，过大可能被拒绝。
+思考深度优先采用上游目录允许的值；上游未提供时可试用低、中、高，是否接受由模型决定。
+这些设置进入本地 Agent 的实际上下文预算与推理请求，不只是显示标签。
+
+参数偏好按 BD 模型保存，与 Cursor 官方模型配置分开。关闭参数开关后停止应用这些覆盖，
+重新开启可以恢复已保存偏好；关闭“使用 BD 反代”仍恢复原来的 Cursor 官方模式。
+本次回归使用本机模拟上游，未消耗真实账号额度；服务商实际支持范围仍以其响应为准。
+
+
+独立模型入口与 Cursor 列表整理（1.4.8）
+
+1. BridgeDock 每个页面右上角都有“模型”按钮。按渠道分组勾选需要反代的模型，
+   可以搜索、只看已选、全选搜索结果或按渠道批量选择，再点“保存选择”。
+   这是所有接入工具共享的反代开放范围；取消关闭窗口不会改变原设置。
+2. Cursor 的 BD 模型选择器单独整理：按渠道显示分组、加宽列表，并提供中文
+   搜索和“参数”入口。选择本次对话模型和调整参数仍在 Cursor 中进行。

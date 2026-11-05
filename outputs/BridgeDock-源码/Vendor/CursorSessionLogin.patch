@@ -1,0 +1,627 @@
+--- a/internal/plugin/plugin.go
++++ b/internal/plugin/plugin.go
+@@ -3,6 +3,7 @@
+ import (
+ 	"bytes"
+ 	"context"
++	"crypto/sha256"
+ 	"fmt"
+ 	"io"
+ 	"net/http"
+@@ -14,6 +15,7 @@
+ 
+ 	"github.com/enderzcx/cursor-agent2api/cursoragentv1"
+ 	"github.com/enderzcx/cursor-agent2api/internal/jsonx"
++	"github.com/google/uuid"
+ 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+ 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+ 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+@@ -21,7 +23,7 @@
+ 	"gopkg.in/yaml.v3"
+ )
+ 
+-const Version = "0.2.2-bridgedock-web-login.1"
++const Version = "0.2.2-bridgedock-session.1"
+ 
+ type Config struct {
+ 	StateDir string `yaml:"state_dir" json:"state_dir"`
+@@ -106,7 +108,7 @@
+ 	return pluginapi.ModelResponse{Provider: cursoragentv1.ProviderID, Models: p.models("")}, nil
+ }
+ 
+-func (p *Plugin) ModelsForAuth(_ context.Context, req pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
++func (p *Plugin) ModelsForAuth(ctx context.Context, req pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
+ 	profile := ""
+ 	if req.Metadata != nil {
+ 		profile = strings.ToLower(strings.TrimSpace(fmt.Sprint(req.Metadata["runtime_profile"])))
+@@ -114,6 +116,12 @@
+ 	if profile == "" || profile == "<nil>" {
+ 		if data, ok := parseStorage(req.StorageJSON); ok {
+ 			profile = strings.ToLower(strings.TrimSpace(data.RuntimeProfile))
++		}
++	}
++	if profile != "sand" && req.HTTPClient != nil {
++		auth := authFromPlugin(req.AuthID, req.AuthProvider, req.StorageJSON, req.Metadata, req.Attributes)
++		if metaString(auth, "access_token") != "" {
++			return discoverCursorModels(ctx, req.HTTPClient, auth)
+ 		}
+ 	}
+ 	return pluginapi.ModelResponse{Provider: cursoragentv1.ProviderID, Models: p.models(profile)}, nil
+@@ -148,6 +156,9 @@
+ 
+ func (p *Plugin) RefreshAuth(ctx context.Context, req pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
+ 	auth := authFromPlugin(req.AuthID, req.AuthProvider, req.StorageJSON, req.Metadata, req.Attributes)
++	if metaString(auth, "auth_method") == "session" {
++		return p.refreshSessionAuth(ctx, req, auth)
++	}
+ 	if metaString(auth, "auth_method") == "browser" {
+ 		return p.refreshBrowserAuth(ctx, req, auth)
+ 	}
+@@ -383,6 +394,29 @@
+ 			auth.Metadata = parsed.Metadata
+ 		}
+ 	}
++	if auth.Metadata == nil {
++		auth.Metadata = make(map[string]any)
++	}
++	if metaString(auth, "base_url") == "" {
++		auth.Metadata["base_url"] = "https://api2.cursor.sh"
++	}
++	if metaString(auth, "client_version") == "" {
++		auth.Metadata["client_version"] = "cli-2026.10.22-27dcf5f"
++	}
++	if data, ok := parseStorage(storage); ok {
++		auth.Prefix = data.Prefix
++		auth.ProxyURL = data.ProxyURL
++	}
++	// The host does not supply the executor's private conversation scope.
++	// Derive it per credential file and transport so accounts never share turns.
++	if auth.Attributes == nil {
++		auth.Attributes = make(map[string]string)
++	}
++	if strings.TrimSpace(auth.Attributes["credential_scope"]) == "" {
++		identity := firstNonEmpty(auth.ID, metaString(auth, "api_key"), metaString(auth, "account_id"))
++		digest := sha256.Sum256([]byte(identity + "\x00" + metaString(auth, "runtime_profile")))
++		auth.Attributes["credential_scope"] = fmt.Sprintf("bridgedock:%x", digest[:])
++	}
+ 	return auth
+ }
+ 
+@@ -406,6 +440,9 @@
+ func mergeStorage(raw []byte, auth *cliproxyauth.Auth) []byte {
+ 	data, _ := parseStorage(raw)
+ 	if auth != nil && auth.Metadata != nil {
++		if v := metaString(auth, "email"); v != "" {
++			data.Email = v
++		}
+ 		if v := strings.TrimSpace(fmt.Sprint(auth.Metadata["access_token"])); v != "" && v != "<nil>" {
+ 			data.AccessToken = v
+ 		}
+@@ -432,6 +469,28 @@
+ 
+ func executionArgs(req pluginapi.ExecutorRequest) (*cliproxyauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) {
+ 	auth := authFromPlugin(req.AuthID, req.AuthProvider, req.StorageJSON, req.AuthMetadata, req.AuthAttributes)
++	metadata := cloneMap(req.Metadata)
++	if metadata == nil {
++		metadata = make(map[string]any)
++	}
++	if session, _ := metadata[cliproxyexecutor.ExecutionSessionMetadataKey].(string); strings.TrimSpace(session) == "" {
++		session = uuid.NewString()
++		// Stateful Responses requests name the prior local session explicitly;
++		// full-history Chat/Messages requests get independent request identities.
++		if req.SourceFormat == string(sdktranslator.FormatOpenAIResponse) || req.Format == string(sdktranslator.FormatOpenAIResponse) {
++			var root map[string]any
++			body := req.OriginalRequest
++			if len(body) == 0 {
++				body = req.Payload
++			}
++			if jsonx.Unmarshal(body, &root) == nil {
++				if previous, _ := root["previous_response_id"].(string); strings.TrimSpace(previous) != "" {
++					session = previous
++				}
++			}
++		}
++		metadata[cliproxyexecutor.ExecutionSessionMetadataKey] = session
++	}
+ 	source := sdktranslator.FromString(strings.TrimSpace(req.SourceFormat))
+ 	format := sdktranslator.FromString(strings.TrimSpace(req.Format))
+ 	if source == "" {
+@@ -448,7 +507,7 @@
+ 		Model:    req.Model,
+ 		Payload:  req.Payload,
+ 		Format:   format,
+-		Metadata: req.Metadata,
++		Metadata: metadata,
+ 	}, cliproxyexecutor.Options{
+ 		Stream:          req.Stream,
+ 		Alt:             req.Alt,
+@@ -457,7 +516,7 @@
+ 		OriginalRequest: req.OriginalRequest,
+ 		SourceFormat:    source,
+ 		ResponseFormat:  format,
+-		Metadata:        req.Metadata,
++		Metadata:        metadata,
+ 	}
+ }
+ 
+--- /dev/null
++++ b/internal/plugin/session_login.go
+@@ -0,0 +1,66 @@
++package plugin
++
++import (
++	"context"
++	"fmt"
++	"net/http"
++	"net/url"
++	"strings"
++	"time"
++
++	"github.com/enderzcx/cursor-agent2api/cursoragentv1"
++	"github.com/enderzcx/cursor-agent2api/internal/jsonx"
++	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
++	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
++)
++
++// Session cookies do not carry a refresh token. Check their current identity
++// with Cursor, preserve the actual expiry, and never treat them as API keys.
++func (p *Plugin) refreshSessionAuth(ctx context.Context, req pluginapi.AuthRefreshRequest, auth *cliproxyauth.Auth) (pluginapi.AuthRefreshResponse, error) {
++	access := metaString(auth, "access_token")
++	subject, expiry, err := cursoragentv1.BrowserTokenIdentity(access)
++	if err != nil || subject != metaString(auth, "account_id") || !expiry.After(time.Now()) {
++		return pluginapi.AuthRefreshResponse{}, fmt.Errorf("Cursor 会话已过期或身份不一致，请重新导入会话凭据")
++	}
++	userID := subject[strings.LastIndex(subject, "|")+1:]
++	if !strings.HasPrefix(userID, "user_") || req.HTTPClient == nil {
++		return pluginapi.AuthRefreshResponse{}, fmt.Errorf("Cursor 会话无法验证，请检查凭据和网络连接")
++	}
++	requestCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
++	defer cancel()
++	response, err := req.HTTPClient.Do(requestCtx, pluginapi.HTTPRequest{
++		Method: http.MethodGet, URL: "https://cursor.com/api/auth/me",
++		Headers: http.Header{
++			"Accept": {"application/json"},
++			"Cookie": {"WorkosCursorSessionToken=" + url.QueryEscape(userID+"::"+access)},
++		},
++	})
++	if err != nil {
++		return pluginapi.AuthRefreshResponse{}, fmt.Errorf("Cursor 会话验证暂时无法连接服务器")
++	}
++	if response.StatusCode != http.StatusOK {
++		return pluginapi.AuthRefreshResponse{}, fmt.Errorf("Cursor 会话验证失败（HTTP %d），请重新导入或检查网络", response.StatusCode)
++	}
++	var profile struct {
++		Subject string `json:"sub"`
++		Email   string `json:"email"`
++	}
++	if len(response.Body) > 1<<20 || jsonx.Unmarshal(response.Body, &profile) != nil {
++		return pluginapi.AuthRefreshResponse{}, fmt.Errorf("Cursor 账号验证响应格式无效")
++	}
++	remoteID := profile.Subject[strings.LastIndex(profile.Subject, "|")+1:]
++	if remoteID != userID || !strings.Contains(profile.Email, "@") {
++		return pluginapi.AuthRefreshResponse{}, fmt.Errorf("Cursor 返回的账号身份与会话不一致")
++	}
++	next := auth.Clone()
++	next.Metadata["email"] = profile.Email
++	next.Metadata["expired"] = expiry.UTC().Format(time.RFC3339)
++	next.Metadata["last_refresh"] = time.Now().UTC().Format(time.RFC3339Nano)
++	result := authToAuthData(next)
++	result.StorageJSON = mergeStorage(req.StorageJSON, next)
++	nextCheck := time.Now().Add(30 * time.Minute)
++	if expiry.Before(nextCheck) {
++		nextCheck = expiry
++	}
++	return pluginapi.AuthRefreshResponse{Auth: result, NextRefreshAfter: nextCheck}, nil
++}
+--- /dev/null
++++ b/internal/plugin/session_login_test.go
+@@ -0,0 +1,104 @@
++package plugin
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"strings"
++	"testing"
++	"time"
++
++	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
++	"github.com/stretchr/testify/require"
++)
++
++func TestSessionChecksIdentityWithoutAPIKeyOrRenewingExpiry(t *testing.T) {
++	p := testPlugin(t)
++	expiry := time.Now().Add(time.Hour).Truncate(time.Second)
++	data := storageFile{Type: "cursor-agent-v1", AuthMethod: "session", RuntimeProfile: "agent_v1",
++		AccountID: "auth0|user_fixture", AccessToken: browserTestToken("auth0|user_fixture", expiry),
++		Prefix: "cursor2", Note: "work", ProxyURL: "http://127.0.0.1:1234"}
++	raw, err := json.Marshal(data)
++	require.NoError(t, err)
++	client := &browserTestClient{t: t, respond: func(request pluginapi.HTTPRequest) pluginapi.HTTPResponse {
++		require.Equal(t, http.MethodGet, request.Method)
++		require.Equal(t, "https://cursor.com/api/auth/me", request.URL)
++		require.Contains(t, request.Headers.Get("Cookie"), "WorkosCursorSessionToken=user_fixture%3A%3A")
++		return pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"sub":"user_fixture","email":"test@example.invalid"}`)}
++	}}
++	req := pluginapi.AuthRefreshRequest{AuthID: "session.json", StorageJSON: raw, HTTPClient: client}
++	refreshed, err := p.RefreshAuth(context.Background(), req)
++	require.NoError(t, err)
++	var saved storageFile
++	require.NoError(t, json.Unmarshal(refreshed.Auth.StorageJSON, &saved))
++	require.Equal(t, data.AccessToken, saved.AccessToken)
++	require.Equal(t, "test@example.invalid", saved.Email)
++	require.Equal(t, expiry.UTC().Format(time.RFC3339), saved.Expired)
++	require.Equal(t, data.Prefix, saved.Prefix)
++	require.Equal(t, data.Note, saved.Note)
++	require.Equal(t, data.ProxyURL, saved.ProxyURL)
++	require.Empty(t, saved.APIKey)
++	require.Empty(t, saved.RefreshToken)
++
++	for _, response := range []pluginapi.HTTPResponse{
++		{StatusCode: 401, Body: []byte(data.AccessToken)},
++		{StatusCode: 200, Body: []byte(`{"sub":"user_other","email":"test@example.invalid"}`)},
++		{StatusCode: 200, Body: []byte(`{}`)},
++		{StatusCode: 200, Body: []byte("invalid-json")},
++	} {
++		client.respond = func(pluginapi.HTTPRequest) pluginapi.HTTPResponse { return response }
++		_, err = p.RefreshAuth(context.Background(), req)
++		require.Error(t, err)
++		require.False(t, strings.Contains(err.Error(), data.AccessToken))
++	}
++	for _, identity := range []string{"auth0|user_other", "auth0|user_fixture"} {
++		data.AccessToken = browserTestToken(identity, time.Now().Add(-time.Minute))
++		req.StorageJSON, _ = json.Marshal(data)
++		client.respond = func(pluginapi.HTTPRequest) pluginapi.HTTPResponse {
++			t.Fatal("invalid session must fail locally")
++			return pluginapi.HTTPResponse{}
++		}
++		_, err = p.RefreshAuth(context.Background(), req)
++		require.Error(t, err, fmt.Sprint(identity))
++	}
++}
++
++func TestImportedAccountsGetIsolatedStableConversationScopes(t *testing.T) {
++	metadata := map[string]any{"account_id": "auth0|user_fixture", "runtime_profile": "agent_v1"}
++	a := authFromPlugin("one.json", "cursor-agent-v1", nil, metadata, nil)
++	b := authFromPlugin("two.json", "cursor-agent-v1", nil, metadata, nil)
++	require.NotEmpty(t, a.Attributes["credential_scope"])
++	require.NotEqual(t, a.Attributes["credential_scope"], b.Attributes["credential_scope"])
++	metadata["access_token"] = "renewed-token"
++	renewed := authFromPlugin("one.json", "cursor-agent-v1", nil, metadata, nil)
++	require.Equal(t, a.Attributes["credential_scope"], renewed.Attributes["credential_scope"])
++	metadata["runtime_profile"] = "sand"
++	otherProfile := authFromPlugin("one.json", "cursor-agent-v1", nil, metadata, nil)
++	require.NotEqual(t, a.Attributes["credential_scope"], otherProfile.Attributes["credential_scope"])
++	require.Equal(t, "https://api2.cursor.sh", a.Metadata["base_url"])
++	require.Equal(t, "cli-2026.10.22-27dcf5f", a.Metadata["client_version"])
++	provided := authFromPlugin("one.json", "cursor-agent-v1", nil, metadata, map[string]string{"credential_scope": "provided"})
++	require.Equal(t, "provided", provided.Attributes["credential_scope"])
++}
++
++func TestOrdinaryAPIRequestsGetExecutionSessions(t *testing.T) {
++	input := pluginapi.ExecutorRequest{AuthID: "one.json", Format: "openai", Metadata: map[string]any{"retained": "value"}}
++	_, first, options := executionArgs(input)
++	_, second, _ := executionArgs(input)
++	key := cliproxyexecutor.ExecutionSessionMetadataKey
++	require.NotEmpty(t, first.Metadata[key])
++	require.NotEqual(t, first.Metadata[key], second.Metadata[key])
++	require.Equal(t, first.Metadata[key], options.Metadata[key])
++	require.Equal(t, "value", first.Metadata["retained"])
++	require.NotContains(t, input.Metadata, key)
++	input.Metadata[key] = "host-session"
++	_, pinned, _ := executionArgs(input)
++	require.Equal(t, "host-session", pinned.Metadata[key])
++	input.Metadata = nil
++	input.SourceFormat = "openai-response"
++	input.OriginalRequest = []byte(`{"previous_response_id":"prior-session"}`)
++	_, continued, _ := executionArgs(input)
++	require.Equal(t, "prior-session", continued.Metadata[key])
++}
+--- /dev/null
++++ b/internal/plugin/account_models.go
+@@ -0,0 +1,61 @@
++package plugin
++
++import (
++	"context"
++	"fmt"
++	"net/http"
++	"strings"
++	"time"
++
++	"github.com/enderzcx/cursor-agent2api/cursoragentv1"
++	"github.com/enderzcx/cursor-agent2api/internal/jsonx"
++	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
++	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
++)
++
++// Discover the exact Agent wire IDs available to this account. The old static
++// catalog contains friendly model names that the Agent endpoint cannot run.
++func discoverCursorModels(ctx context.Context, client pluginapi.HostHTTPClient, auth *cliproxyauth.Auth) (pluginapi.ModelResponse, error) {
++	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
++	defer cancel()
++	response, err := client.Do(ctx, pluginapi.HTTPRequest{
++		Method: http.MethodPost, URL: "https://api2.cursor.sh/agent.v1.AgentService/GetUsableModels",
++		Headers: http.Header{
++			"Authorization": {"Bearer " + metaString(auth, "access_token")},
++			"Content-Type":  {"application/json"}, "Connect-Protocol-Version": {"1"},
++			"X-Cursor-Client-Type": {"cli"}, "X-Cursor-Client-Version": {metaString(auth, "client_version")},
++			"X-Ghost-Mode": {"true"},
++		}, Body: []byte("{}"),
++	})
++	result := pluginapi.ModelResponse{Provider: cursoragentv1.ProviderID}
++	if err != nil {
++		return result, fmt.Errorf("Cursor 模型目录暂时无法连接")
++	}
++	if response.StatusCode != http.StatusOK {
++		return result, fmt.Errorf("Cursor 模型目录返回 HTTP %d", response.StatusCode)
++	}
++	var payload struct {
++		Models []struct {
++			ID      string `json:"modelId"`
++			Name    string `json:"displayName"`
++			MaxMode bool   `json:"maxMode"`
++		} `json:"models"`
++	}
++	if len(response.Body) > 4<<20 || jsonx.Unmarshal(response.Body, &payload) != nil || payload.Models == nil {
++		return result, fmt.Errorf("Cursor 模型目录格式无效")
++	}
++	seen := map[string]bool{}
++	for _, model := range payload.Models {
++		id := strings.TrimSpace(model.ID)
++		// Max-mode-only entries need additional wire parameters; expose only
++		// ordinary runnable entries until that separate mode is implemented.
++		if id == "" || model.MaxMode || seen[id] || strings.ContainsAny(id, "\r\n/\\") {
++			continue
++		}
++		seen[id] = true
++		result.Models = append(result.Models, pluginapi.ModelInfo{ID: id, Object: "model",
++			OwnedBy: cursoragentv1.ProviderID, DisplayName: model.Name, Name: id,
++			SupportedGenerationMethods: []string{"chat"}})
++	}
++	return result, nil
++}
+--- /dev/null
++++ b/internal/plugin/account_models_test.go
+@@ -0,0 +1,35 @@
++package plugin
++
++import (
++	"context"
++	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
++	"github.com/stretchr/testify/require"
++	"net/http"
++	"testing"
++)
++
++func TestAccountCatalogUsesActualWireIDsAndNoModelSubstitution(t *testing.T) {
++	client := &browserTestClient{t: t, respond: func(req pluginapi.HTTPRequest) pluginapi.HTTPResponse {
++		require.Equal(t, "https://api2.cursor.sh/agent.v1.AgentService/GetUsableModels", req.URL)
++		require.Equal(t, "Bearer fixture", req.Headers.Get("Authorization"))
++		require.Equal(t, http.MethodPost, req.Method)
++		return pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"models":[
++		{"modelId":"claude-4.6-sonnet-medium","displayName":"Sonnet"},
++		{"modelId":"gpt-5.2"},{"modelId":"gpt-5.2"},
++		{"modelId":"only-max","maxMode":true}]}`)}
++	}}
++	p := testPlugin(t)
++	req := pluginapi.AuthModelRequest{AuthID: "session.json", Metadata: map[string]any{"access_token": "fixture", "auth_method": "session"}, HTTPClient: client}
++	result, err := p.ModelsForAuth(context.Background(), req)
++	require.NoError(t, err)
++	require.Len(t, result.Models, 2)
++	require.Equal(t, "claude-4.6-sonnet-medium", result.Models[0].ID)
++	require.Equal(t, "gpt-5.2", result.Models[1].ID)
++	require.Zero(t, result.Models[0].ContextLength, "do not invent model limits")
++	client.respond = func(pluginapi.HTTPRequest) pluginapi.HTTPResponse {
++		return pluginapi.HTTPResponse{StatusCode: 401, Body: []byte("fixture")}
++	}
++	_, err = p.ModelsForAuth(context.Background(), req)
++	require.Error(t, err)
++	require.NotContains(t, err.Error(), "fixture")
++}
+--- a/cursoragentv1/server_config.go
++++ b/cursoragentv1/server_config.go
+@@ -61,10 +61,10 @@
+ }
+ 
+ func (e *Executor) validateCursorCredentialIdentity(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) (string, error) {
+-	if metadataValue(auth, "auth_method") == "browser" {
++	if method := metadataValue(auth, "auth_method"); method == "browser" || method == "session" {
+ 		subject, expiry, err := BrowserTokenIdentity(accessToken)
+ 		if err != nil || subject != metadataValue(auth, "account_id") || !expiry.After(time.Now()) {
+-			return "", &requestError{status: http.StatusUnauthorized, text: "Grok Bot 登录已过期或身份不一致，请刷新凭据或重新网页登录"}
++			return "", &requestError{status: http.StatusUnauthorized, text: "Cursor 登录已过期或身份不一致，请刷新凭据或重新登录"}
+ 		}
+ 		return accessToken, nil
+ 	}
+--- a/cursoragentv1/browser_auth_test.go
++++ b/cursoragentv1/browser_auth_test.go
+@@ -23,6 +23,10 @@
+ 	actual, err := executor.validateCursorCredentialIdentity(context.Background(), auth, valid)
+ 	require.NoError(t, err)
+ 	require.Equal(t, valid, actual)
++	auth.Metadata["auth_method"] = "session"
++	actual, err = executor.validateCursorCredentialIdentity(context.Background(), auth, valid)
++	require.NoError(t, err)
++	require.Equal(t, valid, actual)
+ 	_, err = executor.validateCursorCredentialIdentity(context.Background(), auth, token("another-account", time.Now().Add(time.Hour)))
+ 	require.Error(t, err)
+ 	_, err = executor.validateCursorCredentialIdentity(context.Background(), auth, token("browser-account", time.Now().Add(-time.Hour)))
+--- a/cursoragentv1/runner.go
++++ b/cursoragentv1/runner.go
+@@ -417,7 +417,15 @@
+ 						return err
+ 					}
+ 				case wireExecAbort:
+-					return fmt.Errorf("Cursor Agent v1 server aborted exec %d", message.ID)
++					// This cancels one native exec, not the entire model turn.
++					// Cursor also sends it for speculative/already-answered context
++					// requests (including id 0). Only an outstanding caller tool
++					// makes cancellation relevant to the downstream request.
++					for _, pending := range pendingTools {
++						if pending.ID == message.ID {
++							return fmt.Errorf("Cursor Agent v1 server canceled pending tool exec %d", message.ID)
++						}
++					}
+ 				case wireTokenDelta:
+ 					emit(Event{Type: EventUsage, Tokens: message.TokenDelta, Usage: cloneUsageObservation(message.Usage)})
+ 				case wireCheckpoint:
+--- /dev/null
++++ b/cursoragentv1/native_abort_test.go
+@@ -0,0 +1,66 @@
++package cursoragentv1
++
++import (
++	"context"
++	"encoding/base64"
++	"encoding/json"
++	"github.com/stretchr/testify/require"
++	"testing"
++	"time"
++)
++
++func serverAbortFrame(id uint32) []byte {
++	return frameConnect(appendBytesField(nil, 5, appendBytesField(nil, 1, appendVarintField(nil, 1, uint64(id)))))
++}
++
++func TestUntrackedNativeAbortDoesNotDiscardModelReply(t *testing.T) {
++	upstream := newFakeStream()
++	runner := newRunnerForTest(&fakeOpener{stream: upstream}, time.Hour, time.Second)
++	var events []Event
++	result := make(chan error, 1)
++	go func() {
++		result <- runner.Run(context.Background(), baseRunRequest(), func(e Event) { events = append(events, e) })
++	}()
++	assertRunWasWritten(t, upstream)
++	upstream.data <- serverAbortFrame(0)
++	upstream.data <- frameConnect(encodeServerText("reply survived"))
++	upstream.data <- serverAbortFrame(99)
++	upstream.data <- append(frameConnect(encodeServerTurnEnded()), frameConnectWithFlags(nil, connectEndStreamFlag)...)
++	require.NoError(t, <-result)
++	require.Equal(t, EventText, events[0].Type)
++	require.Equal(t, "reply survived", events[0].Text)
++}
++
++func TestAbortForPendingCallerToolStillFails(t *testing.T) {
++	upstream := newFakeStream()
++	runner := newRunnerForTest(&fakeOpener{stream: upstream}, time.Hour, time.Second)
++	request := baseRunRequest()
++	request.ToolResults = make(chan ToolResult)
++	events := make(chan Event, 8)
++	result := make(chan error, 1)
++	go func() { result <- runner.Run(context.Background(), request, func(e Event) { events <- e }) }()
++	assertRunWasWritten(t, upstream)
++	upstream.data <- frameConnect(encodeServerMCP(t, 31, "exec-mcp", "tool-31", "lookup", nil))
++	require.Equal(t, EventToolCall, (<-events).Type)
++	upstream.data <- serverAbortFrame(31)
++	require.ErrorContains(t, <-result, "canceled pending tool exec 31")
++}
++
++func TestConnectFailureRetainsOfficialAccountReason(t *testing.T) {
++	detail := appendStringField(nil, 1, "You have an unpaid invoice")
++	detail = appendStringField(detail, 2, "Resolve billing before resuming requests.")
++	encoded := appendBytesField(nil, 2, detail)
++	body, err := json.Marshal(map[string]any{"error": map[string]any{
++		"code": "resource_exhausted", "message": "Error", "details": []any{
++			map[string]string{"type": "aiserver.v1.ErrorDetails", "value": base64.StdEncoding.EncodeToString(encoded)},
++		},
++	}})
++	require.NoError(t, err)
++	err = parseConnectEndStream(body)
++	require.ErrorContains(t, err, "unpaid invoice")
++	require.ErrorContains(t, err, "Resolve billing")
++	var failure *connectError
++	require.ErrorAs(t, err, &failure)
++	require.Equal(t, 429, failure.StatusCode())
++	require.Nil(t, errorBytesField([]byte{255, 255}, 2))
++}
+--- a/cursoragentv1/connect.go
++++ b/cursoragentv1/connect.go
+@@ -4,11 +4,15 @@
+ package cursoragentv1
+ 
+ import (
++	"encoding/base64"
+ 	"encoding/binary"
+ 	"fmt"
+ 	"net/http"
++	"strings"
++	"unicode/utf8"
+ 
+ 	"github.com/enderzcx/cursor-agent2api/internal/jsonx"
++	"google.golang.org/protobuf/encoding/protowire"
+ )
+ 
+ const (
+@@ -109,6 +113,10 @@
+ 		Error *struct {
+ 			Code    string `json:"code"`
+ 			Message string `json:"message"`
++			Details []struct {
++				Type  string `json:"type"`
++				Value string `json:"value"`
++			} `json:"details"`
+ 		} `json:"error"`
+ 	}
+ 	if err := jsonx.Unmarshal(payload, &trailer); err != nil {
+@@ -122,8 +130,57 @@
+ 		code = "unknown"
+ 	}
+ 	message := trailer.Error.Message
++	for _, detail := range trailer.Error.Details {
++		if detail.Type != "aiserver.v1.ErrorDetails" && detail.Type != "type.googleapis.com/aiserver.v1.ErrorDetails" {
++			continue
++		}
++		data, err := base64.StdEncoding.DecodeString(detail.Value)
++		if err != nil {
++			data, err = base64.RawStdEncoding.DecodeString(detail.Value)
++		}
++		if err != nil || len(data) > 16384 {
++			continue
++		}
++		nested := errorBytesField(data, 2)
++		title, description := errorBytesField(nested, 1), errorBytesField(nested, 2)
++		if !utf8.Valid(title) || !utf8.Valid(description) {
++			continue
++		}
++		text := strings.TrimSpace(string(title) + ": " + string(description))
++		if text != ":" {
++			message = text
++			break
++		}
++	}
+ 	if message == "" {
+ 		message = "unknown error"
+ 	}
+ 	return &connectError{Code: code, Message: message}
+ }
++
++func errorBytesField(data []byte, wanted protowire.Number) []byte {
++	for len(data) > 0 {
++		field, kind, n := protowire.ConsumeTag(data)
++		if n < 0 {
++			return nil
++		}
++		data = data[n:]
++		if kind == protowire.BytesType {
++			value, n := protowire.ConsumeBytes(data)
++			if n < 0 {
++				return nil
++			}
++			if field == wanted {
++				return value
++			}
++			data = data[n:]
++		} else {
++			n := protowire.ConsumeFieldValue(field, kind, data)
++			if n < 0 {
++				return nil
++			}
++			data = data[n:]
++		}
++	}
++	return nil
++}

@@ -17,7 +17,7 @@ struct ModelCapabilityTests {
         check(codex?.supportsVision == true, "image input implies vision")
 
         let budget = ModelCapability(definition: ["id": "claude-haiku", "context_length": 200000, "thinking": ["min": 1024, "max": 128000, "zero_allowed": true]])
-        check(budget?.reasoningEfforts == ["none", "low", "medium", "high"], "budget-only thinking maps to standard levels with off")
+        check(budget?.reasoningEfforts == nil && budget?.contextLength == 200000, "只有预算范围时不猜测思考档位")
 
         let gemini = ModelCapability(definition: ["id": "gemini-2.5-pro", "inputTokenLimit": 1048576, "outputTokenLimit": 65536])
         check(gemini?.contextLength == 1048576 && gemini?.maxOutputTokens == 65536, "Gemini-style token limits")
@@ -26,6 +26,7 @@ struct ModelCapabilityTests {
         let kimi = ModelCapability(definition: ["id": "k3", "context_length": 1048576, "supports_reasoning": true,
                                                 "think_efforts": ["support": true, "valid_efforts": ["low", "high", "max"]]])
         check(kimi?.reasoningEfforts == ["low", "high", "max"], "Kimi valid_efforts are recorded")
+        check(ModelCapability(definition: ["id": "flag", "supports_reasoning": true]) == nil, "只有 supports_reasoning 标记时不猜测档位")
         check(ModelCapability(definition: ["id": "bare", "object": "model"]) == nil, "rows without capability data stay unknown")
         check(ModelCapability(definition: ["id": "bad", "context_length": -5, "thinking": ["levels": ["Bad Value!"]]]) == nil,
               "invalid limits and effort names are rejected")
@@ -39,6 +40,14 @@ struct ModelCapabilityTests {
 
         let rows = ModelListRequest.capabilities(in: ["data": [["id": "k3", "context_length": 262144], ["id": "plain"]]])
         check(rows.keys.sorted() == ["k3"] && rows["k3"]?.contextLength == 262144, "provider /models rows are parsed by id")
+        let irregular = ["result": ["models": [["modelId": "kimi-k3.1", "capabilities": ["contextLength": 1048576,
+                                                                    "reasoningEffort": ["low", "high"]]],
+                                                    ["name": "plain"], ["model": "compact-name"], ["displayName": "display-name"]]]]
+        check(ModelListRequest.names(in: irregular) == ["compact-name", "display-name", "kimi-k3.1", "plain"], "non-standard model list fields are read by canonical ID")
+        check(ModelListRequest.capabilities(in: irregular)["kimi-k3.1"]?.contextLength == 1048576,
+              "nested provider capabilities are normalized")
+        check(ModelListRequest.names(in: ["data": ["error": ["message": "upstream unavailable"], "message": "retry"]]).isEmpty,
+              "error envelopes cannot become fictitious model IDs")
 
         var settings = AppSettings()
         var channel = Channel()
@@ -65,6 +74,21 @@ struct ModelCapabilityTests {
         check(model("claude/claude-opus-4-5").capability?.contextLength == 1000000, "the same model name through another vendor keeps its own limit")
         check(model("mystery").capability == nil && model("mystery").metadata["capabilities"] == nil, "unknown models publish nothing invented")
         check(ModelPublishing.capabilitySummary(model("kimi/k3").capability) == "上下文 1M · 思考 low / high", "picker summary")
+        let reasoningOnly = ModelPublishing.capability(for: ModelItem(id: "cursor/test", owner: "cursor-agent-v1"),
+                                                        settings: AppSettings(),
+                                                        definitions: ["cursor-agent-v1": ["test": ModelCapability(reasoningEfforts: ["low", "high"])]])
+        check(reasoningOnly?.reasoningEfforts == ["low", "high"], "Reasoning controls survive when context length is unknown")
+
+        var kimiWithoutMetadata = Channel(); kimiWithoutMetadata.id = "speed"; kimiWithoutMetadata.name = "Kimi"; kimiWithoutMetadata.prefix = "kimi"
+        kimiWithoutMetadata.modelLines = "kimiK3.1\nkimiK3.1-highspeed"
+        var speedSettings = AppSettings(); speedSettings.channels = [kimiWithoutMetadata]
+        let speedCatalog = ModelPublishing.catalog(rawModels: kimiWithoutMetadata.models.map { ModelItem(id: "kimi/" + $0["name"]!, owner: "moonshot") },
+                                                    settings: speedSettings, accounts: [])
+        check(speedCatalog.count == 1 && speedCatalog.first?.fastModelID == "kimi/kimiK3.1-highspeed",
+              "Kimi Fast pairing survives missing capability metadata: \(speedCatalog.map { ($0.id, $0.fastModelID as Any) })")
+        speedSettings.publishedModelIDs = ["kimi/kimiK3.1-highspeed"]
+        check(ModelPublishing.migrateStoredIDs(&speedSettings, catalog: speedCatalog) && speedSettings.publishedModelIDs == ["kimi/kimiK3.1"],
+              "旧高速发布选择迁移到基础模型")
 
         let encoded = try! JSONEncoder().encode(channel)
         let decoded = try! JSONDecoder().decode(Channel.self, from: encoded)

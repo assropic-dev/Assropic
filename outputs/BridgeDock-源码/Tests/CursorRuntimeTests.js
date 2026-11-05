@@ -41,6 +41,113 @@ function runtime(localSession, document) {
   return context;
 }
 
+// The same native menu is used with either official experiments or local parameters.
+assert.equal(runtime(undefined).__bridgeDockParameterMenu(true), true);
+assert.equal(runtime(undefined).__bridgeDockParameterMenu(false), false);
+assert.equal(runtime({ ...session, modelParametersEnabled: true }).__bridgeDockParameterMenu(false), true);
+assert.equal(runtime({ ...session, modelParametersEnabled: false }).__bridgeDockParameterMenu(true), false);
+
+{
+  const ctx = runtime({ ...session, modelParametersEnabled: true });
+  const definitions = [{ id: 'reasoning', name: 'Effort', parameterType: { enumParameter: {
+    values: [{ value: 'low', displayName: 'Low' }, { value: 'max', displayName: 'Max' }]
+  } } }, { id: 'fast', name: 'Fast', parameterType: { booleanParameter: {
+    values: [{ value: 'false' }, { value: 'true', displayName: 'Fast' }]
+  } } }];
+  const variants = [{ parameterValues: [{ id: 'reasoning', value: 'max' }, { id: 'fast', value: 'true' }], isDefaultNonMaxConfig: true }];
+  const rows = ctx.__bridgeDockEnrichModels([{ name: 'Cursor/test' }], [{ id: 'Cursor/test',
+    bridgedock_parameters: { version: 1, definitions, variants } }]);
+  assert.deepEqual(clone(rows[0].parameterDefinitions.map(item => item.name)), ['思考强度', '快速模式']);
+  assert.deepEqual(clone(rows[0].parameterDefinitions[0].parameterType.enumParameter.values.map(item => item.displayName)), ['Low', 'Max'],
+    '保留 Cursor 官方档位名');
+  assert.deepEqual(clone(rows[0].variants[0].parameterValues), variants[0].parameterValues);
+  assert.equal(rows[0].variants[0].displayNameOutsidePicker, 'Cursor/test Max 快速');
+  const [tooltip] = ctx.__bridgeDockEnrichModels([{ name: 'test', tagline: 'Local provider model', tooltipData: {
+    markdownContent: 'Discovered from your local provider.\n\nContext: 1,048,576 tokens.\n\nMax output: 64,000 tokens.\n\nReasoning: supported.\n\nVision: supported.'
+  } }], []);
+  assert.equal(tooltip.tagline, '本地供应商模型');
+  assert.equal(tooltip.tooltipData.markdownContent, '来自本地供应商。\n\n上下文：1,048,576 词元。\n\n最大输出：64,000 词元。\n\n支持思考。\n\n支持图片输入。');
+}
+
+// version 2：供应商作为参数排在 Effort 后面，每个供应商只组合自己声明的能力。
+{
+  const ctx = runtime({ ...session, modelParametersEnabled: true });
+  const values = (...ids) => ids.map(id => ({ id, label: id }));
+  const entry = { id: 'claude-opus-5.5', bridgedock_parameters: { version: 2,
+    definitions: [
+      { id: 'fast', name: 'Fast', values: values('false', 'true') },
+      { id: 'context', name: '上下文', values: values('300000', '1000000') },
+      { id: 'reasoning', name: '思考强度', values: values('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max') },
+      { id: 'provider', name: '供应商', values: [{ id: 'account:a', label: 'Cursor 账号' }, { id: 'kiro:b', label: 'Kiro' }] }
+    ],
+    providers: [
+      { id: 'account:a', name: 'Cursor 账号', context_length: 1000000,
+        fast: true, context_options: [300000, 1000000],
+        reasoning_effort: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'], reasoning_default: 'medium' },
+      { id: 'kiro:b', name: 'Kiro', context_length: 300000, reasoning_effort: ['low', 'high'] }
+    ] } };
+  const [row] = ctx.__bridgeDockEnrichModels([{ name: 'claude-opus-5.5' }], [entry]);
+  assert.deepEqual(clone(row.parameterDefinitions.map(item => item.id)), ['fast', 'context', 'reasoning', 'provider']);
+  const labels = id => clone(row.parameterDefinitions.find(item => item.id === id).parameterType.enumParameter.values.map(item => item.displayName));
+  assert.deepEqual(labels('reasoning'), ['默认', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'], '没有官方名称时显示档位原名');
+  assert.deepEqual(clone(row.parameterDefinitions.map(item => item.name)), ['快速模式', '上下文', '思考强度', '供应商']);
+  assert.deepEqual(labels('context'), ['300K', '1M']);
+  assert.deepEqual(labels('provider'), ['Cursor 账号', 'Kiro']);
+  const of = (variant, id) => variant.parameterValues.find(item => item.id === id)?.value;
+  const kiro = row.variants.filter(variant => of(variant, 'provider') === 'kiro:b');
+  assert.deepEqual([...new Set(kiro.map(variant => of(variant, 'context')))], ['300000']);
+  assert.deepEqual([...new Set(kiro.map(variant => of(variant, 'reasoning')))], ['low', 'high']);
+  assert.ok(kiro.every(variant => of(variant, 'fast') === undefined), 'Kiro 不继承其他供应商的 Fast 开关');
+  assert.equal(kiro.length, 2);
+  assert.equal(row.variants.length, 2 + 2 * 7 * 2);
+  const defaults = row.variants.filter(variant => variant.isDefaultNonMaxConfig);
+  assert.equal(defaults.length, 1);
+  assert.deepEqual(clone(defaults[0].parameterValues), [{ id: 'fast', value: 'false' }, { id: 'context', value: '1000000' },
+    { id: 'reasoning', value: 'medium' }, { id: 'provider', value: 'account:a' }]);
+  assert.equal(defaults[0].displayNameOutsidePicker, 'claude-opus-5.5 medium');
+  const fastMax = row.variants.find(variant => of(variant, 'fast') === 'true' && of(variant, 'reasoning') === 'max');
+  assert.equal(fastMax.displayNameOutsidePicker, 'claude-opus-5.5 max 快速');
+  assert.equal(row.variants.find(variant => of(variant, 'reasoning') === 'none').displayNameOutsidePicker, 'claude-opus-5.5');
+
+  // 只声明供应商时只出现供应商参数，不猜测 Fast/Context/Effort。
+  const [bare] = ctx.__bridgeDockEnrichModels([{ name: 'kimi-k3' }], [{ id: 'kimi-k3', bridgedock_parameters: { version: 2,
+    definitions: [{ id: 'provider', name: '供应商', values: [{ id: 'p1', label: 'P1' }] }], providers: [{ id: 'p1', name: 'P1' }] } }]);
+  assert.deepEqual(clone(bare.parameterDefinitions.map(item => item.id)), ['provider']);
+  assert.deepEqual(clone(bare.variants.map(variant => variant.parameterValues)), [[{ id: 'provider', value: 'p1' }]]);
+  assert.equal(bare.variants[0].isDefaultNonMaxConfig, true);
+}
+
+// Preserve provider-specific budgets and exact Cursor combinations across refreshes.
+{
+  const ctx = runtime({ ...session, modelParametersEnabled: true });
+  const params = values => Object.entries(values).map(([id, value]) => ({ id, value }));
+  const entry = { id: 'claude-opus-5-5', bridgedock_parameters: { version: 2,
+    definitions: [
+      { id: 'context', values: ['200000', '262144', '524288', '1000000'].map(id => ({ id })) },
+      { id: 'reasoning', values: ['low', 'high'].map(id => ({ id })) },
+      { id: 'fast', values: ['false', 'true'].map(id => ({ id })) },
+      { id: 'provider', values: ['cursor', 'kiro', 'work'].map(id => ({ id, label: id })) }
+    ], providers: [
+      { id: 'cursor', context_length: 1000000, context_options: [1000000], fast: true, reasoning_effort: ['low', 'high'], variants: [
+        { parameterValues: params({ context: '1000000', reasoning: 'low', fast: 'false' }), isDefaultNonMaxConfig: true },
+        { parameterValues: params({ context: '1000000', reasoning: 'high', fast: 'true' }) }
+      ] },
+      { id: 'kiro', context_length: 200000, context_options: [200000] },
+      { id: 'work', context_length: 1000000, context_options: [262144, 1000000], context_default: 262144,
+        fast: true, fast_default: true, reasoning_effort: ['high'], reasoning_default: 'high' }
+    ] } };
+  const [row] = ctx.__bridgeDockEnrichModels([{ name: entry.id }], [entry]);
+  const variants = id => row.variants.filter(variant => variant.parameterValues.some(p => p.id === 'provider' && p.value === id));
+  assert.equal(variants('cursor').length, 2, '不凭空组合 Cursor 不支持的上下文、速度和思考档位');
+  assert.equal(variants('kiro').length, 1, '不支持思考的供应商仍可选择');
+  assert.deepEqual(clone(variants('work')[0].parameterValues), params({ fast: 'true', context: '262144', reasoning: 'high', provider: 'work' }));
+  assert.ok(variants('work').every(v => ['262144', '1000000'].includes(v.parameterValues.find(p => p.id === 'context').value)),
+    'Work 不接收其他供应商的上下文档位');
+  ctx.testRow = row;
+  const restored = vm.runInContext('selectedParameters(testRow, [{id:"provider",value:"kiro"},{id:"context",value:"1000000"},{id:"reasoning",value:"high"}])', ctx);
+  assert.deepEqual(clone(restored), params({ context: '200000', provider: 'kiro' }), '刷新时保留 Kiro，过大的预算降为 Kiro 默认值');
+}
+
 function makeService(initial, storage = new Map()) {
   const state = clone(initial);
   const service = {
@@ -214,6 +321,16 @@ const original = {
     const defaults = rows[0].variants.filter(item => item.isDefaultNonMaxConfig);
     assert.equal(defaults.length, 1);
     assert.deepEqual(clone(defaults[0].parameterValues), [{ id: "context", value: "100000" }, { id: "reasoning", value: "none" }]);
+    const cursor = ctx.__bridgeDockEnrichModels([{ name: "cursor/gpt-medium" }], [{
+      id: "cursor/gpt-medium", capabilities: { context_length: 272000,
+        reasoning_effort: ["low", "medium", "high", "max"], reasoning_default: "medium" }
+    }]);
+    const cursorDefault = cursor[0].variants.find(item => item.isDefaultNonMaxConfig);
+    assert.equal(cursorDefault.parameterValues.find(item => item.id === "reasoning").value, "medium");
+    assert.equal(cursor[0].parameterDefinitions.find(item => item.id === "reasoning")
+      .parameterType.enumParameter.values.find(item => item.value === "none").displayName, "默认");
+    assert.equal(cursorDefault.displayNameOutsidePicker, "cursor/gpt-medium medium");
+    assert.ok(cursor[0].variants.some(item => item.parameterValues.some(param => param.id === "reasoning" && param.value === "max")));
     const kimi = ctx.__bridgeDockEnrichModels([{ name: "kimi/k3" }], [{ id: "kimi/k3", context_length: 1048576,
       capabilities: { context_length: 1048576, reasoning_effort: ["low", "high", "max"] } }]);
     assert.deepEqual(clone(kimi[0].parameterDefinitions.find(item => item.id === "context").parameterType.enumParameter.values.map(item => item.displayName)),
@@ -242,6 +359,27 @@ const original = {
 
   // Native choices survive refresh, switch-off and switch-on. Official model
   // settings remain independent, including their original parameter values.
+  {
+    const ctx = runtime({ ...session, modelParametersEnabled: true });
+    const { service, state } = makeService(original);
+    const name = 'claude-opus-5-5';
+    service.fetchLocalProviderModelEnrichment = async () => ({ pickerModels: [{ name }], allProviderModelIds: [name],
+      providerModelCatalog: [{ id: name, bridgedock_parameters: { version: 2,
+        definitions: [
+          { id: 'context', values: ['200000', '1000000'].map(id => ({ id })) },
+          { id: 'provider', values: ['claude', 'kiro'].map(id => ({ id, label: id })) }
+        ], providers: [{ id: 'claude', context_length: 1000000 }, { id: 'kiro', context_length: 200000 }]
+      } }]
+    });
+    await ctx.__bridgeDockRefreshModels(service, row => row);
+    state.aiSettings.modelConfig.composer = { modelName: 'claude-opus-5.5', selectedModels: [{ modelId: 'claude-opus-5.5',
+      parameters: [{ id: 'context', value: '1000000' }, { id: 'provider', value: 'kiro' }] }] };
+    await ctx.__bridgeDockRefreshModels(service, row => row);
+    assert.equal(state.aiSettings.modelConfig.composer.modelName, name, '旧点号名称迁移到统一模型入口');
+    assert.deepEqual(clone(state.aiSettings.modelConfig.composer.selectedModels[0].parameters),
+      [{ id: 'context', value: '200000' }, { id: 'provider', value: 'kiro' }], '迁移保留原供应商并使用该供应商支持的预算');
+  }
+
   {
     const enabled = runtime({ ...session, modelParametersEnabled: true });
     const { service, state, storage } = makeService(original);
@@ -304,8 +442,8 @@ const original = {
     assert.equal(disabledDoc.styles.length, 0);
   }
 
-  // Native sections keep every route, distinguish equally named sources and
-  // support source-name searches even when the public prefix is abbreviated.
+  // Sections follow model families across providers while keeping every route
+  // and supporting full source-name searches.
   {
     const ctx = runtime(session);
     const models = [{ name: "第二/same" }, { name: "第一/model-10" }, { name: "第一/model-2" }, { name: "同名/same" }];
@@ -322,10 +460,9 @@ const original = {
     assert.deepEqual(first.map(row => row.name), ["第一/model-2", "第一/model-10"]);
     const second = rows.find(row => row.name === "第二/same");
     const duplicateName = rows.find(row => row.name === "同名/same");
-    assert.notEqual(second.namedModelSectionIndex, duplicateName.namedModelSectionIndex);
-    assert.equal(ctx.__bridgeDockModelSection({ models: first }).title, "国内完整渠道名称 · 2");
-    assert.equal(ctx.__bridgeDockModelSection({ models: [second] }).title, "第二个渠道 · 第二 · 1");
-    assert.equal(ctx.__bridgeDockModelSection({ models: [duplicateName] }).title, "第二个渠道 · 同名 · 1");
+    assert.equal(second.namedModelSectionIndex, duplicateName.namedModelSectionIndex);
+    assert.equal(ctx.__bridgeDockModelSection({ models: first }).title, "model · 2");
+    assert.equal(ctx.__bridgeDockModelSection({ models: [second, duplicateName] }).title, "same · 2");
     assert.equal(ctx.__bridgeDockModelSection({ models: rows }).title, undefined);
     assert.ok(ctx.__bridgeDockModelMatches(first[0], "完整渠道 model-2"));
     assert.ok(ctx.__bridgeDockModelMatches(first[0], "ＭＯＤＥＬ-2"));
@@ -334,6 +471,41 @@ const original = {
     assert.equal(ctx.__bridgeDockModelSection(props), props);
     assert.equal(official.__bridgeDockModelSection(props), props);
     assert.equal(official.__bridgeDockModelMatches(first[0], "model-2"), false);
+
+    const liveCatalog = [
+      { id: 'claude-fable-5-1', owned_by: 'Claude' },
+      { id: 'claude-opus-5-5', owned_by: 'Kiro', bridgedock_parameters: { version: 2, providers: [
+        { id: 'provider:kiro', name: 'Kiro' }, { id: 'provider:anthropic', name: 'Claude' }
+      ] } },
+      { id: 'glm-5.3-flash', owned_by: 'ZCode 国际' },
+      { id: 'gpt-6-astra', owned_by: '本机 GPT / Codex' },
+      { id: 'k3.1-pro', owned_by: 'Kimi Code 国内' },
+      { id: 'k3.1-pro-highspeed', owned_by: 'Kimi Code 国内' }
+    ];
+    const liveRows = ctx.__bridgeDockEnrichModels(liveCatalog.map(entry => ({ name: entry.id })), liveCatalog);
+    assert.deepEqual(clone(liveRows.map(row => row.name)), [
+      'gpt-6-astra', 'claude-fable-5-1', 'claude-opus-5-5', 'k3.1-pro', 'k3.1-pro-highspeed', 'glm-5.3-flash'
+    ], '截图中的 Claude 模型必须连续排列');
+    assert.equal(liveRows[1].namedModelSectionIndex, liveRows[2].namedModelSectionIndex, 'Fable 和 Opus 不再被供应商分开');
+    assert.equal(ctx.__bridgeDockModelSection({ models: liveRows.slice(1, 3) }).title, 'Claude · 2');
+    assert.ok(ctx.__bridgeDockModelMatches(liveRows[2], 'Claude opus'), '可按非默认供应商搜索');
+    assert.ok(ctx.__bridgeDockModelMatches(liveRows[2], 'Kiro opus'));
+    const reorderedCatalog = liveCatalog.toReversed().map(entry => ({ ...entry, owned_by: '其他供应商' }));
+    const reordered = ctx.__bridgeDockEnrichModels(reorderedCatalog.map(entry => ({ name: entry.id })), reorderedCatalog);
+    assert.deepEqual(clone(reordered.map(row => [row.name, row.namedModelSectionIndex])),
+      clone(liveRows.map(row => [row.name, row.namedModelSectionIndex])), '供应商变化或目录顺序变化不打散模型系列');
+
+    const families = [['claude/claude-sonnet-5-5', 'kiro/claude-opus-5.5'], ['gpt-6-astra', 'relay/o3'],
+      ['kimi-k3', 'k3.1-pro', 'kimi-work/k2d8-preview', 'kimi-work/k3d1-agent'],
+      ['gemini-3-pro', 'gemini-3-flash'], ['glm-5.3-flash', 'chatglm-6b'], ['qwen3-coder', 'qwq-32b'],
+      ['deepseek-v3', 'deepseek-r1'], ['grok-4', 'grok-4-fast']];
+    const grouped = ctx.__bridgeDockEnrichModels(families.flat().map(name => ({ name })), []);
+    const indices = families.map(names => {
+      const entries = grouped.filter(row => names.includes(row.name));
+      assert.equal(new Set(entries.map(row => row.namedModelSectionIndex)).size, 1, names.join(', '));
+      return entries[0].namedModelSectionIndex;
+    });
+    assert.equal(new Set(indices).size, families.length, '不同模型系列分组独立');
     const labels = { editParameters: "Edit", other: "keep" };
     assert.equal(ctx.__bridgeDockPickerLabels(labels).editParameters, "参数");
     assert.equal(ctx.__bridgeDockPickerLabels(labels).searchPlaceholder, "搜索渠道或模型");

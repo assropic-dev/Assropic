@@ -43,18 +43,79 @@ struct ModelListRequest {
         return result
     }
     static func names(in value: [String: Any]) -> [String] {
-        let rows = value["data"] as? [[String: Any]] ?? value["models"] as? [[String: Any]] ?? []
-        return Array(Set(rows.compactMap { ($0["id"] as? String ?? $0["slug"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })).sorted()
+        let rows = rows(in: value)
+        return Array(Set(rows.compactMap(modelID(in:)).filter { !$0.isEmpty })).sorted()
     }
     static func capabilities(in value: [String: Any]) -> [String: ModelCapability] {
-        let rows = value["data"] as? [[String: Any]] ?? value["models"] as? [[String: Any]] ?? []
+        let rows = rows(in: value)
         var result: [String: ModelCapability] = [:]
         for row in rows {
-            guard let id = (row["id"] as? String ?? row["slug"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty,
-                  let capability = ModelCapability(definition: row) else { continue }
+            guard let id = modelID(in: row), !id.isEmpty else { continue }
+            var definition = row
+            // A number of providers put capabilities under `model`, `metadata`
+            // or `capability` while keeping the ID at the outer level.
+            for key in ["model", "metadata", "capability"] {
+                if let nested = row[key] as? [String: Any] { definition.merge(nested) { current, _ in current } }
+            }
+            guard let capability = ModelCapability(definition: definition) else { continue }
             result[id] = capability
         }
         return result
+    }
+
+    /// OpenAI's `data` array is only one of the shapes returned by model
+    /// registries.  Keep this parser deliberately permissive: the raw ID is
+    /// preserved for routing, while the surrounding fields are used for the
+    /// standard capability model.
+    private static func rows(in value: [String: Any]) -> [[String: Any]] {
+        let keys = ["data", "models", "items", "results", "model_list", "modelList", "available_models", "availableModels", "catalog"]
+        for key in keys {
+            if let rows = value[key] as? [[String: Any]], !rows.isEmpty { return rows }
+            if let names = value[key] as? [String], !names.isEmpty { return names.map { ["id": $0] } }
+            if let map = value[key] as? [String: Any] {
+                let reserved = Set(["error", "errors", "message", "detail", "status", "status_code", "code", "success"])
+                // Error envelopes sometimes reuse `data` or `models` for a
+                // dictionary. Do not turn fields such as `error` and
+                // `message` into fake model IDs; a map with other keys may
+                // still be a legitimate name-to-definition catalogue.
+                if map.keys.allSatisfy({ reserved.contains($0.lowercased()) }) { continue }
+                let mapped = map.compactMap { name, entry -> [String: Any]? in
+                    if var row = entry as? [String: Any] {
+                        if modelID(in: row) == nil { row["id"] = name }
+                        return row
+                    }
+                    return ["id": name]
+                }
+                if !mapped.isEmpty { return mapped }
+            }
+        }
+        for key in ["result", "response", "payload"] {
+            if let nested = value[key] as? [String: Any] {
+                let nestedRows = rows(in: nested)
+                if !nestedRows.isEmpty { return nestedRows }
+            }
+        }
+        return []
+    }
+
+    private static func modelID(in row: [String: Any]) -> String? {
+        if let nested = row["model"] as? [String: Any], let id = modelID(in: nested) { return id }
+        let keys = ["id", "model", "model_id", "modelId", "slug", "name", "display_name", "displayName",
+                    "model_name", "modelName", "canonical_name", "canonicalName", "identifier", "value"]
+        for key in keys {
+            if let value = row[key] as? String {
+                let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !text.isEmpty { return text }
+            }
+        }
+        if let nested = row["model"] as? [String: Any] {
+            for key in keys where key != "model" {
+                if let value = nested[key] as? String, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return value.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+            }
+        }
+        return nil
     }
     static func kimiAlternative(for channel: Channel) -> Channel? {
         guard let preset = Preset.matching(channel) else { return nil }

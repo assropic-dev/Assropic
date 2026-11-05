@@ -1,0 +1,343 @@
+--- a/cursoragentv1/runner.go
++++ b/cursoragentv1/runner.go
+@@ -196,7 +196,9 @@
+ 	}
+ 	runCtx, cancelRun := context.WithCancel(ctx)
+ 	defer cancelRun()
+-	allowedTools := []string{"mcp_tool_call"}
++	// Cursor serves MCP catalog lookup itself before dispatching caller tools.
++	// Current agent builds require both entries in the native tool allowlist.
++	allowedTools := []string{"mcp_tool_call", "get_mcp_tools_tool_call"}
+ 	if request.AllowHostedSearch {
+ 		allowedTools = append(allowedTools, "web_search_tool_call")
+ 	}
+@@ -452,6 +454,12 @@
+ 					if err := writeConnectPayload(upstream, encodeKVSetResult(message.ID)); err != nil {
+ 						return err
+ 					}
++				case wireMCPState:
++					// Caller tools are a stateless catalog. A kick-only request sees
++					// the same catalog, with no local server process to restart.
++					if err := writeConnectPayload(upstream, encodeMCPStateResult(message.ID, message.ExecID, tools, message.ServerIdentifiers)); err != nil {
++						return err
++					}
+ 				case wireRequestContext:
+ 					if err := writeConnectPayload(upstream, encodeRequestContextResult(message.ID, message.ExecID, request.SystemText, tools, requestContextPolicy{
+ 						AllowHostedSearch:   request.AllowHostedSearch,
+--- a/cursoragentv1/runner_test.go
++++ b/cursoragentv1/runner_test.go
+@@ -521,7 +521,7 @@
+ 	time.Sleep(24 * time.Millisecond)
+ 	upstream.data <- append(frameConnect(encodeServerTurnEnded()), frameConnectWithFlags(nil, connectEndStreamFlag)...)
+ 	require.NoError(t, <-result)
+-	require.Equal(t, []string{"mcp_tool_call"}, opener.config.AllowedNativeTools)
++	require.Equal(t, []string{"mcp_tool_call", "get_mcp_tools_tool_call"}, opener.config.AllowedNativeTools)
+ 
+ 	heartbeats := 0
+ 	for {
+@@ -577,7 +577,7 @@
+ 	upstream.data <- frameConnect(encodeServerExec(27, "exec-mcp", 11))
+ 	upstream.data <- append(frameConnect(encodeServerTurnEnded()), frameConnectWithFlags(nil, connectEndStreamFlag)...)
+ 	require.NoError(t, <-result)
+-	require.Equal(t, []string{"mcp_tool_call", "web_search_tool_call", "web_fetch_tool_call"}, opener.config.AllowedNativeTools)
++	require.Equal(t, []string{"mcp_tool_call", "get_mcp_tools_tool_call", "web_search_tool_call", "web_fetch_tool_call"}, opener.config.AllowedNativeTools)
+ 
+ 	counts := map[protowire.Number]int{}
+ 	deadline := time.Now().Add(time.Second)
+--- a/cursoragentv1/hosted_child_search_test.go
++++ b/cursoragentv1/hosted_child_search_test.go
+@@ -163,7 +163,7 @@
+ 	assertRunWasWritten(t, upstream)
+ 	upstream.data <- append(frameConnect(encodeServerTurnEnded()), frameConnectWithFlags(nil, connectEndStreamFlag)...)
+ 	require.NoError(t, <-result)
+-	require.Equal(t, []string{"mcp_tool_call", "web_search_tool_call"}, opener.config.AllowedNativeTools)
++	require.Equal(t, []string{"mcp_tool_call", "get_mcp_tools_tool_call", "web_search_tool_call"}, opener.config.AllowedNativeTools)
+ }
+ 
+ func TestRunnerFetchOnlyDoesNotEnableSearchNativeTool(t *testing.T) {
+@@ -177,7 +177,7 @@
+ 	assertRunWasWritten(t, upstream)
+ 	upstream.data <- append(frameConnect(encodeServerTurnEnded()), frameConnectWithFlags(nil, connectEndStreamFlag)...)
+ 	require.NoError(t, <-result)
+-	require.Equal(t, []string{"mcp_tool_call", "web_fetch_tool_call"}, opener.config.AllowedNativeTools)
++	require.Equal(t, []string{"mcp_tool_call", "get_mcp_tools_tool_call", "web_fetch_tool_call"}, opener.config.AllowedNativeTools)
+ }
+ 
+ func TestRunnerRequiredHostedSearchNeedsNativeExecution(t *testing.T) {
+--- a/cursoragentv1/protocol.go
++++ b/cursoragentv1/protocol.go
+@@ -381,6 +381,9 @@
+ 		message.Type = wireDiagnostics
+ 	case *agentv1.ExecServerMessage_RequestContextArgs:
+ 		message.Type = wireRequestContext
++	case *agentv1.ExecServerMessage_McpStateExecArgs:
++		message.Type = wireMCPState
++		message.ServerIdentifiers = exec.GetMcpStateExecArgs().GetServerIdentifiers()
+ 	case *agentv1.ExecServerMessage_McpArgs:
+ 		message.Type = wireMCP
+ 		decodeTypedMCPArgs(exec.GetMcpArgs(), message)
+@@ -607,6 +610,10 @@
+ 	filtered := numbers[:0]
+ 	for _, number := range numbers {
+ 		switch number {
++		case 44:
++			// GetMcpToolsToolCall reports Cursor's server-managed catalog lookup.
++			// Caller-tool execution still arrives through ExecServerMessage.
++			continue
+ 		case 54, 57, 59, 60:
+ 			continue
+ 		default:
+--- a/cursoragentv1/protocol_feedback.go
++++ b/cursoragentv1/protocol_feedback.go
+@@ -21,7 +21,7 @@
+ 	}
+ 	unknown := update.ProtoReflect().GetUnknown()
+ 	var remaining []protowire.Number
+-	feedbackSeen := false
++	advisorySeen := false
+ 	seen := map[protowire.Number]struct{}{}
+ 	for len(unknown) > 0 {
+ 		number, wireType, consumed := protowire.ConsumeTag(unknown)
+@@ -30,7 +30,7 @@
+ 		}
+ 		unknown = unknown[consumed:]
+ 		if number == interactionFeedbackRequestField {
+-			feedbackSeen = true
++			advisorySeen = true
+ 			if wireType != protowire.BytesType {
+ 				return nil, fmt.Errorf("Cursor Agent v1 feedback request must be length-delimited")
+ 			}
+@@ -49,13 +49,22 @@
+ 			return nil, fmt.Errorf("decode Cursor Agent v1 interaction update field %d: %v", number, protowire.ParseError(n))
+ 		}
+ 		unknown = unknown[n:]
++		if number == 27 {
++			// Cursor 3.27.22 ToolRequestsListedUpdate only reports call_count.
++			// Actual tool requests arrive in their own exec messages.
++			if wireType != protowire.BytesType {
++				return nil, fmt.Errorf("Cursor Agent v1 tool requests listed must be length-delimited")
++			}
++			advisorySeen = true
++			continue
++		}
+ 		if _, exists := seen[number]; exists {
+ 			continue
+ 		}
+ 		seen[number] = struct{}{}
+ 		remaining = append(remaining, number)
+ 	}
+-	if feedbackSeen && len(remaining) > 0 {
++	if advisorySeen && len(remaining) > 0 {
+ 		return nil, protocolDriftError("interaction update", remaining)
+ 	}
+ 	return remaining, nil
+--- a/cursoragentv1/protocol_test.go
++++ b/cursoragentv1/protocol_test.go
+@@ -13,6 +13,62 @@
+ 	"google.golang.org/protobuf/encoding/protowire"
+ 	"google.golang.org/protobuf/proto"
+ )
++
++func TestMCPStateQueryAndCallerCatalogResult(t *testing.T) {
++	query, err := proto.Marshal(&agentv1.AgentServerMessage{
++		Message: &agentv1.AgentServerMessage_ExecServerMessage{
++			ExecServerMessage: &agentv1.ExecServerMessage{
++				Id: 7, ExecId: "catalog-exec",
++				Message: &agentv1.ExecServerMessage_McpStateExecArgs{
++					McpStateExecArgs: &agentv1.McpStateExecArgs{
++						ServerIdentifiers: []string{mcpProviderIdentifier}, KickOnly: true,
++					},
++				},
++			},
++		},
++	})
++	require.NoError(t, err)
++	decoded, err := decodeServerMessage(query)
++	require.NoError(t, err)
++	require.Equal(t, wireMCPState, decoded.Type)
++	require.Equal(t, uint32(7), decoded.ID)
++	require.Equal(t, "catalog-exec", decoded.ExecID)
++	require.Equal(t, []string{mcpProviderIdentifier}, decoded.ServerIdentifiers)
++
++	tool := ToolDefinition{Name: "bd_ping", Description: "Return a marker", InputSchema: []byte(`{"type":"object"}`)}
++	for _, test := range []struct {
++		name        string
++		tools       []ToolDefinition
++		filter      []string
++		wantServers int
++	}{
++		{"all", []ToolDefinition{tool}, nil, 1},
++		{"matching", []ToolDefinition{tool}, []string{mcpProviderIdentifier}, 1},
++		{"other provider", []ToolDefinition{tool}, []string{"other"}, 0},
++		{"no tools", nil, nil, 0},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			client := &agentv1.AgentClientMessage{}
++			err := proto.Unmarshal(encodeMCPStateResult(decoded.ID, decoded.ExecID, test.tools, test.filter), client)
++			require.NoError(t, err)
++			exec := client.GetExecClientMessage()
++			require.Equal(t, decoded.ID, exec.GetId())
++			require.Equal(t, decoded.ExecID, exec.GetExecId())
++			success := exec.GetMcpStateExecResult().GetSuccess()
++			require.NotNil(t, success)
++			require.Len(t, success.GetServers(), test.wantServers)
++			for _, server := range success.GetServers() {
++				require.Equal(t, mcpProviderIdentifier, server.GetServerIdentifier())
++				require.Equal(t, "connected", server.GetStatus())
++				require.Len(t, server.GetTools(), 1)
++				advertised := server.GetTools()[0]
++				require.Equal(t, tool.Name, advertised.GetName())
++				require.Equal(t, mcpProviderIdentifier, advertised.GetProviderIdentifier())
++				require.JSONEq(t, string(tool.InputSchema), advertised.GetInputSchemaJson())
++			}
++		})
++	}
++}
+ 
+ func TestDecodeTypedWebSearchToolCallStartedAndCompleted(t *testing.T) {
+ 	started, err := proto.Marshal(&agentv1.AgentServerMessage{
+@@ -207,6 +263,21 @@
+ 	require.Equal(t, "mcp-1", decoded.ToolCallID)
+ }
+ 
++func TestDecodeIgnoresServerManagedMCPCatalogNotifications(t *testing.T) {
++	for _, updateField := range []protowire.Number{2, 3} {
++		tool := appendBytesField(nil, 44, nil)
++		call := appendStringField(nil, 1, "catalog-1")
++		call = appendBytesField(call, 2, tool)
++		update := appendBytesField(nil, updateField, call)
++		payload := appendBytesField(nil, agentServerInteractionUpdate, update)
++		decoded, err := decodeServerMessage(payload)
++		require.NoError(t, err)
++		require.Equal(t, wireIgnored, decoded.Type)
++		require.Equal(t, "catalog-1", decoded.CallID)
++		require.Empty(t, decoded.ToolName)
++	}
++}
++
+ func TestDecodeFailsClosedOnUnknownToolCallField(t *testing.T) {
+ 	tool := appendBytesField(nil, 88, []byte("drift"))
+ 	started := appendStringField(nil, 1, "unknown-1")
+@@ -224,6 +295,28 @@
+ 	decoded, err := decodeServerMessage(payload)
+ 	require.Nil(t, decoded)
+ 	require.ErrorContains(t, err, "protocol drift")
++}
++
++func TestDecodeTreatsToolRequestCountAsAdvisory(t *testing.T) {
++	update := appendBytesField(nil, 27, appendVarintField(nil, 1, 2))
++	decoded, err := decodeServerMessage(appendBytesField(nil, agentServerInteractionUpdate, update))
++	require.NoError(t, err)
++	require.Equal(t, wireUnknown, decoded.Type)
++	require.Empty(t, decoded.ToolCallID)
++
++	update = appendBytesField(update, 1, appendStringField(nil, 1, "hello"))
++	decoded, err = decodeServerMessage(appendBytesField(nil, agentServerInteractionUpdate, update))
++	require.NoError(t, err)
++	require.Equal(t, wireTextDelta, decoded.Type)
++	require.Equal(t, "hello", decoded.Text)
++
++	update = appendBytesField(update, 42, nil)
++	_, err = decodeServerMessage(appendBytesField(nil, agentServerInteractionUpdate, update))
++	require.ErrorContains(t, err, "protocol drift")
++
++	update = appendVarintField(nil, 27, 2)
++	_, err = decodeServerMessage(appendBytesField(nil, agentServerInteractionUpdate, update))
++	require.ErrorContains(t, err, "length-delimited")
+ }
+ 
+ func TestDecodeTreatsFeedbackRequestAsAdvisory(t *testing.T) {
+--- a/cursoragentv1/wire.go
++++ b/cursoragentv1/wire.go
+@@ -5,6 +5,7 @@
+ 	"encoding/base64"
+ 	"encoding/hex"
+ 	"fmt"
++	"slices"
+ 	"strings"
+ 	"unicode/utf8"
+ 
+@@ -16,6 +17,8 @@
+ )
+ 
+ const (
++	mcpProviderIdentifier = "beefapi"
++
+ 	agentClientRunRequest          protowire.Number = 1
+ 	agentClientExecMessage         protowire.Number = 2
+ 	agentClientKVMessage           protowire.Number = 3
+@@ -62,6 +65,7 @@
+ 	wireThinkingCompleted
+ 	wireAllowlistPrecheck
+ 	wireExecAbort
++	wireMCPState
+ )
+ 
+ type decodedWireMessage struct {
+@@ -77,13 +81,14 @@
+ 	BlobID   []byte
+ 	BlobData []byte
+ 
+-	InteractionKind protowire.Number
+-	ToolCallID      string
+-	ToolName        string
+-	ToolArguments   string
+-	CallID          string
+-	AllowlistKind   string
+-	HostedSearch    *HostedSearch
++	InteractionKind   protowire.Number
++	ToolCallID        string
++	ToolName          string
++	ToolArguments     string
++	CallID            string
++	AllowlistKind     string
++	HostedSearch      *HostedSearch
++	ServerIdentifiers []string
+ }
+ 
+ type runWireRequest struct {
+@@ -265,7 +270,7 @@
+ 	// The live CLI contract carries JSON Schema in input_schema_json (field 6).
+ 	// Field 3 is an opaque protobuf-encoded schema, not raw JSON; populating it
+ 	// with JSON bytes makes Agent v1 fail while parsing the run request.
+-	definition = appendStringField(definition, 4, "beefapi")
++	definition = appendStringField(definition, 4, mcpProviderIdentifier)
+ 	definition = appendStringField(definition, 5, tool.Name)
+ 	definition = appendStringField(definition, 6, string(tool.InputSchema))
+ 	return definition
+@@ -277,6 +282,24 @@
+ 		payload = appendBytesField(payload, 1, encodeMCPTool(tool))
+ 	}
+ 	return payload
++}
++
++func encodeMCPStateResult(id uint32, execID string, tools []ToolDefinition, serverIdentifiers []string) []byte {
++	var success []byte
++	if len(tools) > 0 && (len(serverIdentifiers) == 0 || slices.Contains(serverIdentifiers, mcpProviderIdentifier)) {
++		server := appendStringField(nil, 1, mcpProviderIdentifier)
++		server = appendStringField(server, 2, mcpProviderIdentifier)
++		for _, tool := range tools {
++			server = appendBytesField(server, 5, encodeMCPTool(tool))
++		}
++		server = appendStringField(server, 7, "connected")
++		success = appendBytesField(success, 1, server)
++	}
++	result := appendBytesField(nil, 1, success)
++	execMessage := appendVarintField(nil, 1, uint64(id))
++	execMessage = appendBytesField(execMessage, 36, result)
++	execMessage = appendStringField(execMessage, 15, execID)
++	return appendBytesField(nil, agentClientExecMessage, execMessage)
+ }
+ 
+ type requestContextPolicy struct {
+--- a/internal/plugin/plugin.go
++++ b/internal/plugin/plugin.go
+@@ -23,7 +23,7 @@
+ 	"gopkg.in/yaml.v3"
+ )
+ 
+-const Version = "0.2.2-bridgedock-session.1"
++const Version = "0.2.2-bridgedock-tools.1"
+ 
+ type Config struct {
+ 	StateDir string `yaml:"state_dir" json:"state_dir"`

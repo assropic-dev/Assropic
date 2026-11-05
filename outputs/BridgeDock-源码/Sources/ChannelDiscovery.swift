@@ -8,9 +8,12 @@ extension BridgeStore {
     func discoverModels(for channel: Channel) async throws -> ModelDiscovery {
         guard running else { throw BridgeError.message("请先启动本地服务。") }
         if channel.isKimiWork {
-            let (models, capabilities) = try await kimiWorkCatalog(channel)
-            return ModelDiscovery(channel: channel, modelLines: models.joined(separator: "\n"),
-                                  notice: "已从 Kimi Work 独立网关查询到 \(models.count) 个模型" + Self.capabilityNotice(capabilities, total: models.count),
+            let catalog = try await kimiWorkModelCatalog(channel)
+            var updated = channel
+            updated.workModels = catalog
+            let capabilities = catalog.mapValues(\.capability)
+            return ModelDiscovery(channel: updated, modelLines: catalog.keys.sorted().joined(separator: "\n"),
+                                  notice: "已从 Kimi Work 最新目录查询到 \(catalog.count) 个模型及速度选项。",
                                   capabilities: capabilities)
         }
         let channel = ModelListRequest.normalized(channel)
@@ -56,7 +59,7 @@ extension BridgeStore {
     /// Only the capability record is written; models, aliases and other fields stay.
     func backfillChannelCapabilities() async {
         let pending = settings.channels.filter {
-            $0.enabled && $0.capabilities.isEmpty && !capabilityBackfillAttempted.contains($0.id)
+            $0.enabled && ($0.isKimiWork || $0.capabilities.isEmpty) && !capabilityBackfillAttempted.contains($0.id)
                 && (Preset.matching($0)?.supportsModelDiscovery ?? true)
         }
         guard running, !pending.isEmpty else { return }
@@ -66,6 +69,10 @@ extension BridgeStore {
                   !busy, !workSyncing, let index = settings.channels.firstIndex(where: { $0.id == channel.id }) else { continue }
             var next = settings
             next.channels[index].capabilities = result.capabilities
+            if channel.isKimiWork {
+                next.channels[index].workModels = result.channel.workModels
+                next.channels[index].modelLines = KimiWorkCatalog.merging(Array(result.channel.workModels.keys), into: next.channels[index].modelLines)
+            }
             do {
                 try await update(next)
                 record("已记录 \(channel.name) 的模型上下文与思考强度 · \(result.capabilities.count) 个模型")

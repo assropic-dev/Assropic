@@ -104,6 +104,8 @@ struct LogicTests {
         settings.managementKey = "management-test-key"
         settings.channels = [channel]
         let config = settings.coreConfig(dataDirectory: scratch, pluginDirectory: scratch.appendingPathComponent("plugins"))
+        check((config["multimedia"] as? [String: Any])?["disable-image-generation"] as? String == "chat",
+              "chat requests are not given a hidden image tool")
         try privateWrite(jsonData(config), to: scratch.appendingPathComponent("config.yaml"))
         try first.write(to: scratch.appendingPathComponent("codex-output.toml"))
         try Data(kimiText.utf8).write(to: scratch.appendingPathComponent("kimi-output.toml"))

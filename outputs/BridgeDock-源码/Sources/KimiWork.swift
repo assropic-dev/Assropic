@@ -26,8 +26,8 @@ enum KimiWorkReadError: LocalizedError {
     }
 }
 
-/// An in-memory view of Kimi Work's own login. It never refreshes or persists tokens.
-struct KimiWorkSession: CustomStringConvertible, CustomDebugStringConvertible {
+/// A BridgeDock-owned session. The desktop reader below is only for one-time import.
+struct KimiWorkSession: Codable, CustomStringConvertible, CustomDebugStringConvertible {
     static let baseURL = "https://agent-gw.kimi.com/coding/v1"
     static let maximumFileSize = 8 * 1024 * 1024
     static var defaultURL: URL {
@@ -38,6 +38,8 @@ struct KimiWorkSession: CustomStringConvertible, CustomDebugStringConvertible {
     let apiKey: String
     let webToken: String
     let accountHash: String
+    var refreshToken: String? = nil
+    var ownsAPIKey: Bool? = nil
     var fingerprint: String { Self.digest(apiKey) }
     var description: String { "KimiWorkSession(accountHash: \(accountHash))" }
     var debugDescription: String { description }
@@ -108,7 +110,53 @@ struct KimiWorkSession: CustomStringConvertible, CustomDebugStringConvertible {
         return value
     }
 
-    private static func digest(_ value: String) -> String {
+    static func digest(_ value: String) -> String {
         SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func claims(_ token: String) -> [String: Any]? {
+        let parts = token.split(separator: ".")
+        guard parts.count == 3 else { return nil }
+        var text = String(parts[1]).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        text += String(repeating: "=", count: (4 - text.count % 4) % 4)
+        guard let data = Data(base64Encoded: text) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    var needsRefresh: Bool {
+        guard let expiry = Self.claims(webToken)?["exp"] as? Double else { return true }
+        return expiry < Date().timeIntervalSince1970 + 300
+    }
+}
+
+struct KimiWorkCredentialStore {
+    let directory: URL
+
+    init(dataDirectory: URL) { directory = dataDirectory.appendingPathComponent("kimi-work") }
+
+    private func file(_ hash: String) throws -> URL {
+        guard hash.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil else {
+            throw BridgeError.message("Work 账号标识无效，请重新登录。")
+        }
+        return directory.appendingPathComponent(hash + ".json")
+    }
+
+    func read(_ hash: String) throws -> KimiWorkSession {
+        let url = try file(hash)
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              attrs[.type] as? FileAttributeType == .typeRegular,
+              (attrs[.size] as? NSNumber)?.intValue ?? Int.max < KimiWorkSession.maximumFileSize,
+              let data = try? Data(contentsOf: url),
+              let session = try? JSONDecoder().decode(KimiWorkSession.self, from: data),
+              session.accountHash == hash, !session.apiKey.isEmpty,
+              !session.apiKey.contains(where: { $0.isWhitespace }) else {
+            throw BridgeError.message("BridgeDock 尚未保存此 Work 登录，请点击网页登录。")
+        }
+        return session
+    }
+
+    func save(_ session: KimiWorkSession) throws {
+        try privateWrite(JSONEncoder().encode(session), to: file(session.accountHash))
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
     }
 }

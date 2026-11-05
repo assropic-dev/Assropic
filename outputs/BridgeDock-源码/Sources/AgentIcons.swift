@@ -5,7 +5,7 @@ import AppKit
 private enum AgentArtwork {
     static let images: [String: NSImage] = {
         var images: [String: NSImage] = [:]
-        for name in ["cursor", "claude", "codex", "kimi", "kiro", "zcode"] {
+        for name in ["cursor", "claude", "codex", "kimi", "kiro", "zcode", "grok", "deepseek"] {
             if let url = Bundle.main.url(forResource: name, withExtension: "png", subdirectory: "AgentIcons"),
                let image = NSImage(contentsOf: url) {
                 image.isTemplate = false
@@ -30,6 +30,10 @@ extension ClientTool {
         }
         return AgentArtwork.images[name]
     }
+}
+
+extension SourceFamily {
+    var icon: NSImage? { iconName.flatMap { AgentArtwork.images[$0] } }
 }
 
 extension EditingAgent {

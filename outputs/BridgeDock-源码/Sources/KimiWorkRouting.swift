@@ -1,11 +1,10 @@
 import Foundation
 
-/// Resolves desktop credentials only for the transient configuration sent to the core.
-/// The saved settings continue to contain an account reference, never a desktop token.
+/// Resolves BridgeDock-owned credentials only for the private core configuration.
 enum KimiWorkRouting {
     static func resolve(
         _ value: AppSettings,
-        read: (String) throws -> KimiWorkSession = { try KimiWorkSession.read(expectedAccountHash: $0) }
+        read: (String) throws -> KimiWorkSession
     ) -> AppSettings {
         var resolved = value
         for index in resolved.channels.indices where resolved.channels[index].isKimiWork {
@@ -21,10 +20,10 @@ enum KimiWorkRouting {
         return resolved
     }
 
-    /// Detects desktop token rotation and unavailable/changed accounts without exposing tokens.
+    /// Detects credential replacement without exposing tokens.
     static func fingerprint(
         _ value: AppSettings,
-        read: (String) throws -> KimiWorkSession = { try KimiWorkSession.read(expectedAccountHash: $0) }
+        read: (String) throws -> KimiWorkSession
     ) -> String {
         value.channels.filter { $0.isKimiWork && $0.enabled }.map { channel in
             let credential = session(for: channel, read: read)?.fingerprint ?? "unavailable"

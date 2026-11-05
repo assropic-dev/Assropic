@@ -155,6 +155,34 @@ struct LocalSubscriptionTests {
         try write(social, to: cache.appendingPathComponent("kiro-auth-token.json"))
         check(try object(LocalSubscriptionCredentials.load(provider: "kiro", home: home, environment: [:]).data)["profileArn"] as? String == "fixture-arn", "Social Kiro login needs no unrelated registration")
         rejects("Unsupported local providers fail clearly") { _ = try LocalSubscriptionCredentials.load(provider: "unsupported", home: home, environment: [:]) }
+        let kimiHome = home.appendingPathComponent("kimi-home")
+        try write(["type": "kimi", "api_key": "fixture-kimi-key"], to: kimiHome.appendingPathComponent("credentials.json"))
+        let localKimi = try LocalSubscriptionCredentials.load(provider: "kimi", home: home, environment: ["KIMI_HOME": kimiHome.path])
+        check(localKimi.provider == "kimi" && localKimi.source.hasSuffix("credentials.json"), "Kimi local subscription reader uses KIMI_HOME")
+        let genericKimi = try object(localKimi.data)
+        check(genericKimi["type"] as? String == "kimi" && genericKimi["api_key"] as? String == "fixture-kimi-key", "Generic local subscription fields stay normalized")
+        let kimiCodeHome = home.appendingPathComponent("kimi-code-home")
+        let kimiCodeConfig = """
+        [providers.kimi-code]
+        type = "kimi"
+        base_url = "https://api.kimi.com/coding/v1"
+        oauth = { storage = "file", key = "oauth/kimi-code" }
+        """
+        try FileManager.default.createDirectory(at: kimiCodeHome, withIntermediateDirectories: true)
+        try Data(kimiCodeConfig.utf8).write(to: kimiCodeHome.appendingPathComponent("config.toml"))
+        try write(["access_token": "fixture-kimi-oauth-access", "refresh_token": "fixture-kimi-oauth-refresh",
+                   "expires_at": 4_102_444_800.0, "token_type": "Bearer"],
+                  to: kimiCodeHome.appendingPathComponent("credentials/kimi-code.json"))
+        let oauthKimi = try LocalSubscriptionCredentials.load(provider: "kimi", home: home,
+                                                              environment: ["KIMI_CODE_HOME": kimiCodeHome.path,
+                                                                            "KIMI_HOME": kimiHome.path])
+        let oauthKimiDocument = try object(oauthKimi.data)
+        check(oauthKimi.source.hasSuffix("credentials/kimi-code.json"), "Kimi Code OAuth reference resolves its credential file")
+        check(oauthKimiDocument["access_token"] as? String == "fixture-kimi-oauth-access"
+              && oauthKimiDocument["refresh_token"] as? String == "fixture-kimi-oauth-refresh",
+              "Kimi Code local subscription imports the logged-in OAuth tokens")
+        check(oauthKimiDocument["local_identity"] as? String == "kimi-code/kimi-code.json",
+              "Kimi Code OAuth storage gives the BD account a stable local identity")
         print("PASS \(count) native subscription import and local read assertions; synthetic credentials only")
     }
 }

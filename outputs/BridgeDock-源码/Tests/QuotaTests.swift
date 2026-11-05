@@ -15,6 +15,14 @@ import Foundation
         check(QuotaParser.number("NaN") == nil, "Non-finite values stay unknown")
         check(QuotaParser.number("10USD") == nil, "Partial numeric strings stay unknown")
         check(QuotaParser.number("-0.123456") == Decimal(string: "-0.123456"), "Preserve decimal balances")
+        var unknownRelay = Channel(); unknownRelay.baseURL = "https://relay.example/v1"; unknownRelay.balanceMode = .auto
+        check(unknownRelay.effectiveBalanceMode == .unavailable, "Unknown relays do not guess a New API balance endpoint")
+        let cursor = Account(["name": "cursor.json", "provider": "cursor-agent-v1"])
+        check(!QuotaTarget(account: cursor).queryAvailable, "Cursor accounts without a unified quota endpoint are shown as unconfigured")
+        let codexAccount = Account(["name": "codex.json", "provider": "codex"])
+        check(QuotaTarget(account: codexAccount).queryAvailable, "Supported subscription quota adapters remain refreshable")
+        let emptyMetric = QuotaMetric(id: "empty", title: "空", remaining: nil)
+        check(!QuotaParser.displayable(emptyMetric), "Empty balance rows stay out of the visible quota cards")
         check(QuotaParser.date("2026-11-02T00:00:00Z") == Date(timeIntervalSince1970: 1793577600), "ISO reset date")
         check(QuotaParser.date(1793577600000 as Int64) == Date(timeIntervalSince1970: 1793577600), "Millisecond reset date")
 
@@ -23,6 +31,8 @@ import Foundation
         check(claude.metrics.first?.reset != nil, "Claude reset")
         check(!claude.metrics.contains(where: { $0.id == "seven_day" }), "Null Claude quota must not show full remaining")
         check(claude.details.first?.value == "未启用", "Disabled extra usage")
+        let doubled = QuotaParser.claude(object(#"{"five_hour":{"utilization":43,"resets_at":"2026-11-04T10:00:00Z"},"seven_day":{"utilization":80,"resets_at":"2026-11-05T07:00:00Z"},"limits":[{"kind":"session","percent":43,"resets_at":"2026-11-04T10:00:00Z"},{"kind":"weekly_all","percent":80,"resets_at":"2026-11-05T07:00:00Z"},{"kind":"weekly_scoped","percent":12,"scope":{"model":{"display_name":"Opus"}}}]}"#))
+        check(doubled.metrics.map(\.title) == ["5 小时额度", "7 天额度", "Opus"], "Claude limits must not repeat existing windows")
         let extra = QuotaParser.claude(object(#"{"extra_usage":{"is_enabled":true,"monthly_limit":5000,"used_credits":1250}}"#)).metrics[0]
         check(extra.limit == 50 && extra.used == Decimal(string: "12.5") && extra.unit == "USD", "Claude extra usage cents to currency")
 
@@ -39,6 +49,14 @@ import Foundation
         check(kimi.metrics[0].reset != nil, "Kimi reset")
         check(kimi.metrics[1].usedPercentage == 20, "Kimi ratio scale")
         check(!QuotaParser.hasValues(QuotaParser.kimi([:])), "Empty Kimi response is unavailable")
+        let kimiRatios = QuotaParser.kimi(object(#"{"limits":[{"window":{"duration":300,"timeUnit":"TIME_UNIT_MINUTE"},"detail":{"limit":"100","used":"88","remaining":"12"}}],"usages":{"limit_5h":{"used_ratio":0.25,"reset_time":"2026-11-02T00:00:00Z"},"limit_7d":{"used_ratio":0.4},"limit_month_total":{"used_ratio":0.125},"limit_month_code":{"used_ratio":0.1}}}"#))
+        check(kimiRatios.metrics.map(\.title) == ["5 小时额度", "周额度", "月度额度"], "Kimi ratio windows use percentage rows")
+        check(kimiRatios.metrics.map(\.usedPercentage) == [25, 40, 12.5], "Kimi ratios convert from fractions to percentages")
+        check(kimiRatios.metrics.allSatisfy { $0.used == nil && $0.limit == nil && $0.remaining == nil }, "Kimi ratio rows do not mix count units")
+        check(kimiRatios.metrics.first?.reset == Date(timeIntervalSince1970: 1793577600), "Kimi ratio reset date")
+        let kimiWrapped = QuotaParser.kimi(object(#"{"data":{"kind":"ok","quota":{"usages":{"limit5h":{"usedRatio":0.5}}}}}"#))
+        check(kimiWrapped.metrics.first?.title == "5 小时额度" && kimiWrapped.metrics.first?.usedPercentage == 50,
+              "Kimi accepts the wrapped camelCase ratio response")
 
         let xai = QuotaParser.xai(object(#"{"config":{"currentPeriod":{"type":"weekly","end":"2026-11-02T00:00:00Z"},"creditUsagePercent":30,"monthlyLimit":{"val":2000},"used":{"val":500},"prepaidBalance":{"val":"1234"}}}"#), label: "周额度")
         check(xai.metrics.first?.usedPercentage == 30, "Grok weekly percentage")

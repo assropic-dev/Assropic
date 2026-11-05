@@ -56,15 +56,8 @@ struct ModelPublicationView: View {
                 Pill(text: "已选 \(selectedCount) / \(store.availableModels.count)")
             }
             HStack(spacing: 12) {
-                HStack(spacing: 7) {
-                    Image(systemName: "magnifyingglass").foregroundStyle(mutedInk)
-                    TextField("搜索渠道或模型", text: $search).textFieldStyle(.plain)
-                        .accessibilityIdentifier("model-publication-search")
-                    if !search.isEmpty {
-                        Button { search = "" } label: { Image(systemName: "xmark.circle.fill") }
-                            .buttonStyle(.plain).foregroundStyle(mutedInk).help("清除搜索")
-                    }
-                }.padding(10).background(insetSurface, in: RoundedRectangle(cornerRadius: 9))
+                SearchField(prompt: "搜索渠道或模型", text: $search)
+                    .accessibilityIdentifier("model-publication-search")
                 Toggle("只看已选", isOn: $selectedOnly).toggleStyle(.checkbox)
                 Button(refreshing ? "刷新中…" : (store.running ? "刷新目录" : "启动服务")) {
                     Task { await refreshCatalog() }
@@ -76,8 +69,9 @@ struct ModelPublicationView: View {
                 Spacer()
                 Button(hasSearch ? "全选结果" : "全选") { changeSelection(visibleIDs, enabled: true) }
                     .disabled(visibleIDs.isSubset(of: selection))
-                Button("清空全部") { edited = true; selection.removeAll() }
-                    .disabled(selection.isEmpty)
+                Button("清空结果") { changeSelection(visibleIDs, enabled: false) }
+                    .disabled(visibleIDs.isDisjoint(with: selection))
+                    .help("只取消当前筛选结果中的勾选")
             }.disabled(saving || refreshing)
             if !store.running {
                 Label("服务已停止，启动后可获取并保存反代模型。", systemImage: "pause.circle")
@@ -94,8 +88,12 @@ struct ModelPublicationView: View {
                                     changeSelection([model.id], enabled: $0)
                                 })) {
                                     VStack(alignment: .leading, spacing: 4) {
-                                        Text(model.modelName).font(.system(size: 13, weight: .medium))
-                                        Text(model.publicID).font(.system(size: 10, design: .monospaced))
+                                        HStack(spacing: 6) {
+                                            Text(model.workModel?.displayName ?? model.modelName).font(.system(size: 13, weight: .medium))
+                                            Pill(text: model.sourceName, active: false)
+                                            if model.workModel?.supportsFast == true || model.fastModelID != nil { Pill(text: "快速模式", active: false) }
+                                        }
+                                        Text(model.publicID).monoSmall(10)
                                             .foregroundStyle(mutedInk).textSelection(.enabled)
                                         Text(ModelPublishing.capabilitySummary(model.capability))
                                             .font(.system(size: 10)).foregroundStyle(mutedInk)

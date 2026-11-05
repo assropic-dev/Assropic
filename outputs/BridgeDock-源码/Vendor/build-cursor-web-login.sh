@@ -15,6 +15,8 @@ mkdir "$CURSOR_SOURCE_DIR"
 tar -xzf "$CURSOR_BUILD_DIR/upstream.tar.gz" -C "$CURSOR_SOURCE_DIR" --strip-components=1
 cd "$CURSOR_SOURCE_DIR"
 patch -p1 < "$VENDOR_DIR/CursorWebLogin.patch"
+patch -p1 < "$VENDOR_DIR/CursorSessionLogin.patch"
+patch -p1 < "$VENDOR_DIR/CursorToolCatalog.patch"
 go test ./internal/plugin ./cursoragentv1
 CGO_ENABLED=1 MACOSX_DEPLOYMENT_TARGET=14.0 go build -trimpath -buildmode=c-shared \
   -o "$CURSOR_BUILD_DIR/cursor-agent2api.dylib" ./cmd/cursor-agent2api

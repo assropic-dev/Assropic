@@ -208,6 +208,22 @@ class SubscriptionChecks:
         self.check(cursor["provider"] == "cursor-agent-v1" and cursor["disabled"],
                    "Cursor key import is recognized as a disabled subscription")
 
+        self.imported("cursor-session-fixture.json", {
+            "type": "cursor-agent-v1", "auth_method": "session", "runtime_profile": "agent_v1",
+            "access_token": "test.eyJzdWIiOiJhdXRoMHx1c2VyX2ZpeHR1cmUiLCJleHAiOjQwNzA5MDg4MDB9.signature",
+            "account_id": "auth0|user_fixture", "email": "session@example.invalid",
+            "prefix": "cursor-session", "disabled": True,
+            "expired": FUTURE, "last_refresh": FUTURE,
+        })
+        session_account = self.files()["cursor-session-fixture.json"]
+        self.check(session_account["provider"] == "cursor-agent-v1" and session_account["disabled"],
+                   "Cursor session import is recognized without an API key")
+        code, session_doc = self.request("/v8/management/credentials/download?name=cursor-session-fixture.json")
+        self.check(code == 200 and session_doc.get("auth_method") == "session"
+                   and session_doc.get("prefix") == "cursor-session"
+                   and not session_doc.get("api_key"),
+                   "Cursor sessions preserve their auth method and independent prefix")
+
         self.imported("grok-bot-fixture.json", {
             "type": "cursor-agent-v1", "api_key": "key_synthetic_never_used",
             "email": "cursor@example.invalid", "runtime_profile": "sand",

@@ -39,3 +39,30 @@ https://github.com/qunqin24/Pulse/blob/main/Sources/Pulse/Auth/CursorWebLogin.sw
 https://github.com/andreanjos/grokbot-headless/blob/main/grok-bot-headless.mjs
 The flow and renewal endpoint were also checked against the installed
 Grok Bot 0.78.1 application. The adaptation does not embed personal credentials.
+
+BridgeDock session import adaptation (2026-11-04)
+-----------------------------------------------
+CursorSessionLogin.patch adds explicitly imported Cursor web sessions to the
+Agent v1 transport. Session identity is checked at cursor.com/api/auth/me.
+Unlike API keys and browser OAuth refresh tokens, pasted sessions cannot renew
+themselves: their original expiry is retained and re-import is required then.
+The patch preserves existing API-key and Grok Bot login behavior.
+It also supplies per-account execution scopes and per-request session IDs,
+discovers exact Agent model IDs through GetUsableModels, keeps structured
+Cursor error reasons, and treats cancellation of unrelated native execs as a
+per-exec notification rather than failure of the entire model response.
+The advertised CLI build matches the official installer checked on 2026-11-04:
+cli-2026.10.22-27dcf5f. Max-mode-only catalog entries are not advertised.
+Protocol references: https://github.com/can1357/oh-my-pi (MIT) and
+https://cursor.com/install. No source from these references is bundled.
+
+BridgeDock MCP catalog compatibility (2026-11-04)
+-----------------------------------------------
+CursorToolCatalog.patch adds the server-managed MCP catalog lookup allowlist,
+McpStateExecArgs responses using the caller's advertised tools, and support
+for catalog and tool-count transcript notifications in Cursor 3.27.22.
+Specific regression tests cover catalog filtering, request IDs, notification
+handling, and continued rejection of unknown protocol fields.
+Protocol references include the installed Cursor 3.27.22 descriptors and
+https://github.com/can1357/oh-my-pi/blob/main/packages/ai/src/providers/cursor/exec-modern.ts
+(MIT). The local adaptation reuses the existing wire encoder.

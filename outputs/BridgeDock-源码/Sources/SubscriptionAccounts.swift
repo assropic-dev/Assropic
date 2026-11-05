@@ -13,9 +13,13 @@ struct SubscriptionProvider: Identifiable {
         }
         return true
     }
-    var unavailableReason: String { available ? "" : "ZCode 订阅插件需要 macOS 15 或更高版本；仍可使用 API 渠道中的 Coding Plan Key。" }
+    var unavailableReason: String { available ? "" : "ZCode 订阅插件需要 macOS 15 或更高版本；仍可在本页用 Coding Plan Key 添加。" }
     var supportsCallback: Bool { ["claude", "codex"].contains(id) }
-    var supportsLocalLogin: Bool { ["claude", "codex", "kiro"].contains(id) }
+    /// Every subscription gets the same local-reader entry point.  Providers
+    /// without a documented file simply return a precise "not found" message;
+    /// the button no longer forces users to paste credentials when the client
+    /// already keeps a supported local JSON/token file.
+    var supportsLocalLogin: Bool { true }
     // Only these handlers bind the refreshed identity to the selected file.
     var supportsRecovery: Bool { ["codex", "kiro", "zcode-bigmodel", "zcode-zai"].contains(id) }
     static let all: [SubscriptionProvider] = [
@@ -24,7 +28,7 @@ struct SubscriptionProvider: Identifiable {
         .init(id: "kimi", title: "Kimi 国内", detail: "Kimi Code 国内账号 · 设备码授权", sourceURL: "https://github.com/router-for-me/CLIProxyAPI"),
         .init(id: "kimi-ai", title: "Kimi 国际", detail: "Kimi.ai Code 账号 · 设备码授权", sourceURL: "https://github.com/router-for-me/CLIProxyAPI"),
         .init(id: "kiro", title: "Kiro", detail: "连接本机 Kiro 登录（含 Google / GitHub），或使用 Builder ID / 组织授权", sourceURL: "https://github.com/xiaokui-dev/cliproxyapi-kiro-plugin"),
-        .init(id: "cursor-agent-v1", title: "Cursor / Grok Bot", detail: "Grok Bot 使用 Cursor 网页授权 · 完成后自动保存账号", sourceURL: "https://github.com/enderzcx/cursor-agent2api"),
+        .init(id: "cursor-agent-v1", title: "Cursor", detail: "Cursor 订阅账号 · 支持会话凭据与账号 Key，使用账号可用的第三方模型", sourceURL: "https://github.com/enderzcx/cursor-agent2api"),
         .init(id: "xai", title: "Grok Build / xAI", detail: "Grok Build CLI · 独立设备码授权；Grok Bot 请使用 Cursor / Grok Bot 入口", sourceURL: "https://github.com/router-for-me/CLIProxyAPI"),
         .init(id: "zcode-bigmodel", title: "ZCode 国内", detail: "智谱 BigModel 个人订阅 · 浏览器授权", sourceURL: "https://github.com/WizisCool/omc-zcode-oauth"),
         .init(id: "zcode-zai", title: "ZCode 国际", detail: "Z.ai 个人订阅 · 浏览器授权", sourceURL: "https://github.com/WizisCool/omc-zcode-oauth")
@@ -52,11 +56,95 @@ enum CursorAccountProfile: String, CaseIterable, Identifiable {
 
     func credential(label: String, key: String, prefix: String) throws -> [String: Any] {
         let key = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        if CursorSessionCredential.recognizes(key) {
+            return try CursorSessionCredential(key).credential(profile: self, label: label, prefix: prefix)
+        }
         guard !key.isEmpty, !key.contains(where: { $0.isWhitespace }) else {
             throw BridgeError.message("请填写完整的 Cursor 账号 Key，不要包含空格或换行。")
         }
         return ["type": Self.providerID, "api_key": key, "runtime_profile": rawValue,
                 "note": label.trimmingCharacters(in: .whitespacesAndNewlines), "prefix": prefix]
+    }
+}
+
+/// A pasted web session is not an API key. Claims are only format checks;
+/// Cursor's authenticated profile endpoint must confirm identity before import.
+struct CursorSessionCredential {
+    let email: String
+    let userID: String
+    let subject: String
+    let accessToken: String
+    let expiresAt: Date
+
+    static func recognizes(_ text: String) -> Bool {
+        text.contains("----") || text.contains("::") || text.lowercased().contains("%3a%3a")
+            || text.hasPrefix("WorkosCursorSessionToken=") || text.hasPrefix("eyJ")
+    }
+
+    init(_ input: String, now: Date = Date()) throws {
+        var value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value.utf8.count <= 16_384, !value.contains(where: { $0.isWhitespace || $0.isNewline }) else {
+            throw BridgeError.message("Cursor 会话凭据格式不完整，请粘贴单个账号的完整凭据。")
+        }
+        var email = ""
+        if let separator = value.range(of: "----") {
+            email = String(value[..<separator.lowerBound])
+            value = String(value[separator.upperBound...])
+            guard email.contains("@"), !email.contains(";") else {
+                throw BridgeError.message("Cursor 账号格式应为 邮箱----user_…::令牌。")
+            }
+        }
+        if value.hasPrefix("WorkosCursorSessionToken=") {
+            value = String(value.dropFirst("WorkosCursorSessionToken=".count))
+        }
+        value = value.removingPercentEncoding ?? value
+        let parts = value.components(separatedBy: "::")
+        guard parts.count <= 2 else { throw BridgeError.message("请一次粘贴一个 Cursor 账号。") }
+        let token = parts.last ?? ""
+        let jwt = token.components(separatedBy: ".")
+        guard jwt.count == 3, jwt.allSatisfy({ !$0.isEmpty && $0.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil }) else {
+            throw BridgeError.message("Cursor 会话令牌格式无效，请重新复制完整凭据。")
+        }
+        var payload = jwt[1].replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        payload += String(repeating: "=", count: (4 - payload.count % 4) % 4)
+        guard let data = Data(base64Encoded: payload),
+              let claims = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let subject = claims["sub"] as? String,
+              let userID = subject.components(separatedBy: "|").last, userID.hasPrefix("user_"),
+              userID.range(of: "^user_[A-Za-z0-9]+$", options: .regularExpression) != nil,
+              let expiry = claims["exp"] as? Double, expiry.isFinite else {
+            throw BridgeError.message("Cursor 会话缺少有效的账号身份或到期时间。")
+        }
+        guard parts.count == 1 || parts[0] == userID else {
+            throw BridgeError.message("Cursor 用户 ID 与会话令牌不属于同一账号，请重新复制。")
+        }
+        let expiresAt = Date(timeIntervalSince1970: expiry)
+        guard expiresAt > now else { throw BridgeError.message("Cursor 会话已过期，请重新登录 Cursor 并复制新凭据。") }
+        self.email = email
+        self.userID = userID
+        self.subject = subject
+        self.accessToken = token
+        self.expiresAt = expiresAt
+    }
+
+    var cookie: String { "WorkosCursorSessionToken=" + userID + "%3A%3A" + accessToken }
+
+    func verifiedEmail(_ profile: [String: Any]) throws -> String {
+        guard let remoteSubject = profile["sub"] as? String,
+              remoteSubject.components(separatedBy: "|").last == userID,
+              let actualEmail = profile["email"] as? String, actualEmail.contains("@"),
+              email.isEmpty || email.caseInsensitiveCompare(actualEmail) == .orderedSame else {
+            throw BridgeError.message("Cursor 返回的账号身份与粘贴的凭据不一致，未添加账号。")
+        }
+        return actualEmail
+    }
+
+    func credential(profile: CursorAccountProfile, label: String, prefix: String) -> [String: Any] {
+        ["type": CursorAccountProfile.providerID, "auth_method": "session",
+         "access_token": accessToken, "account_id": subject, "email": email,
+         "expired": ISO8601DateFormatter().string(from: expiresAt),
+         "runtime_profile": profile.rawValue, "base_url": "https://api2.cursor.sh", "client_version": "cli-2026.10.22-27dcf5f",
+         "note": label.trimmingCharacters(in: .whitespacesAndNewlines), "prefix": prefix]
     }
 }
 

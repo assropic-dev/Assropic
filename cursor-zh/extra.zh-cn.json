@@ -15,5 +15,324 @@
     "Find root causes and fix tricky bugs": "找到根本原因，修复棘手的错误",
     "Import your Claude Code conversations": "导入你的 Claude Code 对话",
     "Sync your chats and continue them in Cursor": "同步你的对话，在 Cursor 里继续"
-  }
+  },
+  "exact": [
+    ["reu=\"Send follow-up\"", "reu=\"发送后续消息\""],
+    ["defaultPlaceholder:\"Send follow-up\"", "defaultPlaceholder:\"发送后续消息\""],
+    ["compactPlaceholder:h===reu?\"Follow up\":void 0", "compactPlaceholder:h===reu?\"继续追问\":void 0"],
+    ["Yv=Vt?\"Send follow-up with subagent\"", "Yv=Vt?\"通过子智能体发送后续消息\""],
+    ["\"Continue chatting in Cursor\"", "\"在 Cursor 里继续对话\"", 2],
+    ["N(\"glass.agentPanel.continueWorking\",\"Resume\")", "N(\"glass.agentPanel.continueWorking\",\"继续\")"],
+    ["label:Yv?\"Resume\":\"Try again\"", "label:Yv?\"继续\":\"重试\""],
+    ["\"Planning next moves\"", "\"正在规划下一步\"", 5],
+    ["mFa=\"Wrapping up\"", "mFa=\"正在收尾\""],
+    [
+      "shellToolCall:{loading:\"Running\",completed:\"Ran\",error:\"Run\"}",
+      "shellToolCall:{loading:\"正在运行\",completed:\"已运行\",error:\"运行\"}"
+    ],
+    [
+      "deleteToolCall:{loading:\"Deleting\",completed:\"Deleted\",error:\"Delete\"}",
+      "deleteToolCall:{loading:\"正在删除\",completed:\"已删除\",error:\"删除\"}"
+    ],
+    [
+      "globToolCall:{loading:\"Searching files\",completed:\"Searched files\",error:\"Search files\"}",
+      "globToolCall:{loading:\"正在搜索文件\",completed:\"已搜索文件\",error:\"搜索文件\"}"
+    ],
+    [
+      "grepToolCall:{loading:\"Grepping\",completed:\"Grepped\",error:\"Grep\"}",
+      "grepToolCall:{loading:\"正在搜索\",completed:\"已搜索\",error:\"搜索\"}"
+    ],
+    [
+      "readToolCall:{loading:\"Reading\",completed:\"Read\",error:\"Read\"}",
+      "readToolCall:{loading:\"正在读取\",completed:\"已读取\",error:\"读取\"}"
+    ],
+    [
+      "updateTodosToolCall:{loading:\"Updating todos\",completed:\"Updated todos\",error:\"Update todos\"}",
+      "updateTodosToolCall:{loading:\"正在更新待办\",completed:\"已更新待办\",error:\"更新待办\"}"
+    ],
+    [
+      "readTodosToolCall:{loading:\"Reading todos\",completed:\"Read todos\",error:\"Read todos\"}",
+      "readTodosToolCall:{loading:\"正在读取待办\",completed:\"已读取待办\",error:\"读取待办\"}"
+    ],
+    [
+      "editToolCall:{loading:\"Editing\",completed:\"Edited\",error:\"Edit\"}",
+      "editToolCall:{loading:\"正在编辑\",completed:\"已编辑\",error:\"编辑\"}"
+    ],
+    [
+      "lsToolCall:{loading:\"Listing\",completed:\"Listed\",error:\"List\"}",
+      "lsToolCall:{loading:\"正在列出\",completed:\"已列出\",error:\"列出\"}"
+    ],
+    [
+      "readLintsToolCall:{loading:\"Reading lints\",completed:\"Read lints\",error:\"Read lints\"}",
+      "readLintsToolCall:{loading:\"正在读取 lint 问题\",completed:\"已读取 lint 问题\",error:\"读取 lint 问题\"}"
+    ],
+    [
+      "mcpToolCall:{loading:\"Running\",completed:\"Ran\",error:\"Run\"}",
+      "mcpToolCall:{loading:\"正在运行\",completed:\"已运行\",error:\"运行\"}"
+    ],
+    [
+      "getMcpToolsToolCall:{loading:\"Exploring tools\",completed:\"Explored tools\",error:\"Explore tools\"}",
+      "getMcpToolsToolCall:{loading:\"正在查看工具\",completed:\"已查看工具\",error:\"查看工具\"}"
+    ],
+    [
+      "semSearchToolCall:{loading:\"Searching\",completed:\"Searched\",error:\"Search\"}",
+      "semSearchToolCall:{loading:\"正在搜索\",completed:\"已搜索\",error:\"搜索\"}"
+    ],
+    [
+      "createPlanToolCall:{loading:\"Writing plan\",completed:\"Wrote plan\",error:\"Write plan\"}",
+      "createPlanToolCall:{loading:\"正在写计划\",completed:\"已写计划\",error:\"写计划\"}"
+    ],
+    [
+      "webSearchToolCall:{loading:\"Searching web\",completed:\"Searched web\",error:\"Search web\"}",
+      "webSearchToolCall:{loading:\"正在搜索网页\",completed:\"已搜索网页\",error:\"搜索网页\"}"
+    ],
+    [
+      "xSearchToolCall:{loading:\"Searching X\",completed:\"Searched X\",error:\"Search X\"}",
+      "xSearchToolCall:{loading:\"正在搜索 X\",completed:\"已搜索 X\",error:\"搜索 X\"}"
+    ],
+    [
+      "taskToolCall:{loading:\"Working on task\",completed:\"Completed task\",error:\"Work on task\"}",
+      "taskToolCall:{loading:\"正在处理任务\",completed:\"已完成任务\",error:\"处理任务\"}"
+    ],
+    [
+      "getAgentStatusToolCall:{loading:\"Checking agents\",completed:\"Checked agents\",error:\"Check agents\"}",
+      "getAgentStatusToolCall:{loading:\"正在查看智能体\",completed:\"已查看智能体\",error:\"查看智能体\"}"
+    ],
+    [
+      "sendToAgentToolCall:{loading:\"Messaging agent\",completed:\"Messaged agent\",error:\"Message agent\"}",
+      "sendToAgentToolCall:{loading:\"正在给智能体发消息\",completed:\"已给智能体发消息\",error:\"给智能体发消息\"}"
+    ],
+    [
+      "readAgentTranscriptToolCall:{loading:\"Reading transcript\",completed:\"Read transcript\",error:\"Read transcript\"}",
+      "readAgentTranscriptToolCall:{loading:\"正在读取对话记录\",completed:\"已读取对话记录\",error:\"读取对话记录\"}"
+    ],
+    [
+      "createAgentToolCall:{loading:\"Creating agent\",completed:\"Created agent\",error:\"Create agent\"}",
+      "createAgentToolCall:{loading:\"正在创建智能体\",completed:\"已创建智能体\",error:\"创建智能体\"}"
+    ],
+    [
+      "createProjectToolCall:{loading:\"Creating Project\",completed:\"Created Project\",error:\"Create Project\"}",
+      "createProjectToolCall:{loading:\"正在创建项目\",completed:\"已创建项目\",error:\"创建项目\"}"
+    ],
+    [
+      "stopAgentToolCall:{loading:\"Stopping agent\",completed:\"Stopped agent\",error:\"Stop agent\"}",
+      "stopAgentToolCall:{loading:\"正在停止智能体\",completed:\"已停止智能体\",error:\"停止智能体\"}"
+    ],
+    [
+      "listTrackedTasksToolCall:{loading:\"Listing tasks\",completed:\"Listed tasks\",error:\"List tasks\"}",
+      "listTrackedTasksToolCall:{loading:\"正在列出任务\",completed:\"已列出任务\",error:\"列出任务\"}"
+    ],
+    [
+      "createTrackedTasksToolCall:{loading:\"Creating tasks\",completed:\"Created tasks\",error:\"Create tasks\"}",
+      "createTrackedTasksToolCall:{loading:\"正在创建任务\",completed:\"已创建任务\",error:\"创建任务\"}"
+    ],
+    [
+      "updateTrackedTasksToolCall:{loading:\"Updating tasks\",completed:\"Updated tasks\",error:\"Update tasks\"}",
+      "updateTrackedTasksToolCall:{loading:\"正在更新任务\",completed:\"已更新任务\",error:\"更新任务\"}"
+    ],
+    [
+      "deleteTrackedTasksToolCall:{loading:\"Deleting tasks\",completed:\"Deleted tasks\",error:\"Delete tasks\"}",
+      "deleteTrackedTasksToolCall:{loading:\"正在删除任务\",completed:\"已删除任务\",error:\"删除任务\"}"
+    ],
+    [
+      "updateTrackedTaskStatusesToolCall:{loading:\"Updating task statuses\",completed:\"Updated task statuses\",error:\"Update task statuses\"}",
+      "updateTrackedTaskStatusesToolCall:{loading:\"正在更新任务状态\",completed:\"已更新任务状态\",error:\"更新任务状态\"}"
+    ],
+    [
+      "updateTrackedTaskTagsToolCall:{loading:\"Updating tags\",completed:\"Updated tags\",error:\"Update tags\"}",
+      "updateTrackedTaskTagsToolCall:{loading:\"正在更新标签\",completed:\"已更新标签\",error:\"更新标签\"}"
+    ],
+    [
+      "listMcpResourcesToolCall:{loading:\"Listing resources\",completed:\"Listed resources\",error:\"List resources\"}",
+      "listMcpResourcesToolCall:{loading:\"正在列出资源\",completed:\"已列出资源\",error:\"列出资源\"}"
+    ],
+    [
+      "readMcpResourceToolCall:{loading:\"Reading resource\",completed:\"Read resource\",error:\"Read resource\"}",
+      "readMcpResourceToolCall:{loading:\"正在读取资源\",completed:\"已读取资源\",error:\"读取资源\"}"
+    ],
+    [
+      "applyAgentDiffToolCall:{loading:\"Applying diff\",completed:\"Applied diff\",error:\"Apply diff\"}",
+      "applyAgentDiffToolCall:{loading:\"正在应用改动\",completed:\"已应用改动\",error:\"应用改动\"}"
+    ],
+    [
+      "askQuestionToolCall:{loading:\"Asking questions\",completed:\"Asked questions\",error:\"Ask question\"}",
+      "askQuestionToolCall:{loading:\"正在提问\",completed:\"已提问\",error:\"Ask question\"}"
+    ],
+    [
+      "blameByFilePathToolCall:{loading:\"Looking up blame\",completed:\"Looked up blame\",error:\"Look up blame\"}",
+      "blameByFilePathToolCall:{loading:\"正在查看 blame\",completed:\"已查看 blame\",error:\"查看 blame\"}"
+    ],
+    [
+      "awaitToolCall:{loading:\"Waiting\",completed:\"Waited\",error:\"Wait\"}",
+      "awaitToolCall:{loading:\"正在等待\",completed:\"已等待\",error:\"等待\"}"
+    ],
+    [
+      "fetchToolCall:{loading:\"Fetching\",completed:\"Fetched\",error:\"Fetch\"}",
+      "fetchToolCall:{loading:\"正在获取\",completed:\"已获取\",error:\"获取\"}"
+    ],
+    [
+      "switchModeToolCall:{loading:\"Switching mode\",completed:\"Switched mode\",error:\"Switch mode\"}",
+      "switchModeToolCall:{loading:\"正在切换模式\",completed:\"已切换模式\",error:\"切换模式\"}"
+    ],
+    [
+      "generateImageToolCall:{loading:\"Generating image\",completed:\"Generated image\",error:\"Generate image\"}",
+      "generateImageToolCall:{loading:\"正在生成图片\",completed:\"已生成图片\",error:\"生成图片\"}"
+    ],
+    [
+      "generateVideoToolCall:{loading:\"Generating video\",completed:\"Generated video\",error:\"Generate video\"}",
+      "generateVideoToolCall:{loading:\"正在生成视频\",completed:\"已生成视频\",error:\"生成视频\"}"
+    ],
+    [
+      "computerUseToolCall:{loading:\"Using computer\",completed:\"Used computer\",error:\"Use computer\"}",
+      "computerUseToolCall:{loading:\"正在操作电脑\",completed:\"已操作电脑\",error:\"操作电脑\"}"
+    ],
+    [
+      "writeShellStdinToolCall:{loading:\"Writing to shell\",completed:\"Wrote to shell\",error:\"Write to shell\"}",
+      "writeShellStdinToolCall:{loading:\"正在写入终端\",completed:\"已写入终端\",error:\"写入终端\"}"
+    ],
+    [
+      "reflectToolCall:{loading:\"Reflecting\",completed:\"Reflected\",error:\"Reflect\"}",
+      "reflectToolCall:{loading:\"正在反思\",completed:\"已反思\",error:\"反思\"}"
+    ],
+    [
+      "setupVmEnvironmentToolCall:{loading:\"Setting up VM\",completed:\"Set up VM\",error:\"Set up VM\"}",
+      "setupVmEnvironmentToolCall:{loading:\"正在设置虚拟机\",completed:\"已设置虚拟机\",error:\"设置虚拟机\"}"
+    ],
+    [
+      "replaceEnvToolCall:{loading:\"Replacing environment\",completed:\"Replaced environment\",error:\"Replace environment\"}",
+      "replaceEnvToolCall:{loading:\"正在替换环境\",completed:\"已替换环境\",error:\"替换环境\"}"
+    ],
+    [
+      "searchConversationsToolCall:{loading:\"Searching conversations\",completed:\"Searched conversations\",error:\"Search conversations\"}",
+      "searchConversationsToolCall:{loading:\"正在搜索对话\",completed:\"已搜索对话\",error:\"搜索对话\"}"
+    ],
+    [
+      "createGoalToolCall:{loading:\"Creating goal\",completed:\"Created goal\",error:\"Create goal\"}",
+      "createGoalToolCall:{loading:\"正在创建目标\",completed:\"已创建目标\",error:\"创建目标\"}"
+    ],
+    [
+      "updateGoalToolCall:{loading:\"Updating goal\",completed:\"Updated goal\",error:\"Update goal\"}",
+      "updateGoalToolCall:{loading:\"正在更新目标\",completed:\"已更新目标\",error:\"更新目标\"}"
+    ],
+    [
+      "truncatedToolCall:{loading:\"Processing\",completed:\"Processed\",error:\"Process\"}",
+      "truncatedToolCall:{loading:\"正在处理\",completed:\"已处理\",error:\"处理\"}"
+    ],
+    [
+      "startGrindExecutionToolCall:{loading:\"Executing\",completed:\"Executed\",error:\"Execute\"}",
+      "startGrindExecutionToolCall:{loading:\"正在执行\",completed:\"已执行\",error:\"执行\"}"
+    ],
+    [
+      "startGrindPlanningToolCall:{loading:\"Planning\",completed:\"Planned\",error:\"Plan\"}",
+      "startGrindPlanningToolCall:{loading:\"正在规划\",completed:\"已规划\",error:\"规划\"}"
+    ],
+    [
+      "webFetchToolCall:{loading:\"Fetching page\",completed:\"Fetched page\",error:\"Fetch page\"}",
+      "webFetchToolCall:{loading:\"正在获取网页\",completed:\"已获取网页\",error:\"获取网页\"}"
+    ],
+    [
+      "reportBugfixResultsToolCall:{loading:\"Reporting results\",completed:\"Reported results\",error:\"Report results\"}",
+      "reportBugfixResultsToolCall:{loading:\"正在报告结果\",completed:\"已报告结果\",error:\"报告结果\"}"
+    ],
+    [
+      "aiAttributionToolCall:{loading:\"Learning from Cursor Blame\",completed:\"Learned from Cursor Blame\",error:\"Learn from Cursor Blame\"}",
+      "aiAttributionToolCall:{loading:\"正在学习 Cursor Blame\",completed:\"已学习 Cursor Blame\",error:\"学习 Cursor Blame\"}"
+    ],
+    [
+      "communicateUpdateToolCall:{loading:\"Updating progress\",completed:\"Updated progress\",error:\"Update progress\"}",
+      "communicateUpdateToolCall:{loading:\"正在更新进度\",completed:\"已更新进度\",error:\"更新进度\"}"
+    ],
+    [
+      "prManagementToolCall:{loading:\"Managing PR\",completed:\"Managed PR\",error:\"Manage PR\"}",
+      "prManagementToolCall:{loading:\"正在管理 PR\",completed:\"已管理 PR\",error:\"Manage PR\"}"
+    ],
+    [
+      "editPrLabelsToolCall:{loading:\"Editing PR labels\",completed:\"Edited PR labels\",error:\"Edit PR labels\"}",
+      "editPrLabelsToolCall:{loading:\"正在编辑 PR 标签\",completed:\"已编辑 PR 标签\",error:\"编辑 PR 标签\"}"
+    ],
+    [
+      "fetchCloudAgentDataToolCall:{loading:\"Fetching cloud agent data\",completed:\"Fetched cloud agent data\",error:\"Fetch cloud agent data\"}",
+      "fetchCloudAgentDataToolCall:{loading:\"正在获取云端智能体数据\",completed:\"已获取云端智能体数据\",error:\"获取云端智能体数据\"}"
+    ],
+    [
+      "mcpAuthToolCall:{loading:\"Authenticating MCP server\",completed:\"Authenticated MCP server\",error:\"MCP authentication\"}",
+      "mcpAuthToolCall:{loading:\"正在认证 MCP 服务器\",completed:\"已认证 MCP 服务器\",error:\"MCP 认证\"}"
+    ],
+    [
+      "connectScmToolCall:{loading:\"Connecting GitHub\",completed:\"Connected GitHub\",error:\"Connect GitHub\"}",
+      "connectScmToolCall:{loading:\"正在连接 GitHub\",completed:\"已连接 GitHub\",error:\"Connect GitHub\"}"
+    ],
+    [
+      "reportBugToolCall:{loading:\"Reporting bug\",completed:\"Reported bug\",error:\"Report bug\"}",
+      "reportBugToolCall:{loading:\"正在报告错误\",completed:\"已报告错误\",error:\"报告错误\"}"
+    ],
+    [
+      "sendFinalSummaryToolCall:{loading:\"Recording final summary\",completed:\"Recorded final summary\",error:\"Record final summary\"}",
+      "sendFinalSummaryToolCall:{loading:\"正在记录最终总结\",completed:\"已记录最终总结\",error:\"记录最终总结\"}"
+    ],
+    [
+      "sendMessageToolCall:{loading:\"Sending message\",completed:\"Sent message\",error:\"Send message\"}",
+      "sendMessageToolCall:{loading:\"正在发送消息\",completed:\"已发送消息\",error:\"发送消息\"}"
+    ],
+    [
+      "sendToUserToolCall:{loading:\"Sending message\",completed:\"Sent message\",error:\"Send message\"}",
+      "sendToUserToolCall:{loading:\"正在发送消息\",completed:\"已发送消息\",error:\"发送消息\"}"
+    ],
+    [
+      "setActiveBranchToolCall:{loading:\"Updating metadata\",completed:\"Updated metadata\",error:\"Update metadata\"}",
+      "setActiveBranchToolCall:{loading:\"正在更新元数据\",completed:\"已更新元数据\",error:\"更新元数据\"}"
+    ],
+    [
+      "updateOriginPrCodeTourToolCall:{loading:\"Updating code tour\",completed:\"Updated code tour\",error:\"Update code tour\"}",
+      "updateOriginPrCodeTourToolCall:{loading:\"正在更新代码导览\",completed:\"已更新代码导览\",error:\"更新代码导览\"}"
+    ],
+    [
+      "getOriginPrCodeTourToolCall:{loading:\"Reading code tour\",completed:\"Read code tour\",error:\"Read code tour\"}",
+      "getOriginPrCodeTourToolCall:{loading:\"正在读取代码导览\",completed:\"已读取代码导览\",error:\"读取代码导览\"}"
+    ],
+    [
+      "writeCanvasToolCall:{loading:\"Writing canvas\",completed:\"Wrote canvas\",error:\"Write canvas\"}",
+      "writeCanvasToolCall:{loading:\"正在写入画布\",completed:\"已写入画布\",error:\"写入画布\"}"
+    ],
+    [
+      "readCanvasToolCall:{loading:\"Reading canvas\",completed:\"Read canvas\",error:\"Read canvas\"}",
+      "readCanvasToolCall:{loading:\"正在读取画布\",completed:\"已读取画布\",error:\"读取画布\"}"
+    ],
+    [
+      "recordCiInvestigationFindingsToolCall:{loading:\"Recording CI findings\",completed:\"Recorded CI findings\",error:\"Record CI findings\"}",
+      "recordCiInvestigationFindingsToolCall:{loading:\"正在记录 CI 结论\",completed:\"已记录 CI 结论\",error:\"记录 CI 结论\"}"
+    ],
+    [
+      "piReadToolCall:{loading:\"Reading\",completed:\"Read\",error:\"Read\"}",
+      "piReadToolCall:{loading:\"正在读取\",completed:\"已读取\",error:\"读取\"}"
+    ],
+    [
+      "piBashToolCall:{loading:\"Running\",completed:\"Ran\",error:\"Run\"}",
+      "piBashToolCall:{loading:\"正在运行\",completed:\"已运行\",error:\"运行\"}"
+    ],
+    [
+      "piEditToolCall:{loading:\"Editing\",completed:\"Edited\",error:\"Edit\"}",
+      "piEditToolCall:{loading:\"正在编辑\",completed:\"已编辑\",error:\"编辑\"}"
+    ],
+    [
+      "piWriteToolCall:{loading:\"Writing\",completed:\"Wrote\",error:\"Write\"}",
+      "piWriteToolCall:{loading:\"正在写入\",completed:\"已写入\",error:\"写入\"}"
+    ],
+    [
+      "piGrepToolCall:{loading:\"Grepping\",completed:\"Grepped\",error:\"Grep\"}",
+      "piGrepToolCall:{loading:\"正在搜索\",completed:\"已搜索\",error:\"搜索\"}"
+    ],
+    [
+      "piFindToolCall:{loading:\"Searching files\",completed:\"Searched files\",error:\"Search files\"}",
+      "piFindToolCall:{loading:\"正在搜索文件\",completed:\"已搜索文件\",error:\"搜索文件\"}"
+    ],
+    [
+      "piLsToolCall:{loading:\"Listing\",completed:\"Listed\",error:\"List\"}",
+      "piLsToolCall:{loading:\"正在列出\",completed:\"已列出\",error:\"列出\"}"
+    ],
+    [
+      "={loading:\"Creating\",completed:\"Created\",error:\"Create\"}",
+      "={loading:\"正在创建\",completed:\"已创建\",error:\"创建\"}"
+    ]
+  ]
 }

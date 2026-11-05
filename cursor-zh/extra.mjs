@@ -2,7 +2,7 @@
 // 用 Cursor 自带的 Node 运行：
 //   ELECTRON_RUN_AS_NODE=1 /Applications/Cursor.app/Contents/MacOS/Cursor extra.mjs [--dir=<Cursor.app/Contents>]
 // 只做两件事：
-//   1. 精确替换几处写死在程序里、语言包没碰的字符串；
+//   1. 精确替换写死在程序里、语言包没碰的字符串（含 extra.zh-cn.json 的 exact 列表）；
 //   2. 在 Agents 窗口里加一个只认固定原文的小翻译器，翻译 Cursor 服务器发来的首页建议卡片。
 // 改完后更新 product.json 里的校验值，否则 Cursor 会提示安装已损坏。
 // 撤销：运行语言包的 restore，它会从原始备份恢复整个文件（本脚本的改动一起撤销）。
@@ -31,6 +31,10 @@ const literalRules = [
   ['workbench.glass.main.js', /([,{;\s(][A-Za-z_$][\w$]*)="No Repo"(?=[,;}])/g, `$1=${JSON.stringify(extra.literals['No Repo'])}`, 1],
   ['workbench.glass.main.js', /([,{;\s(][A-Za-z_$][\w$]*)="No-repo Automations"(?=[,;}])/g, `$1=${JSON.stringify(extra.literals['No-repo Automations'])}`, 0],
 ];
+
+// 工具步骤标题、追问输入框等写死的界面文字：[原文, 译文, 命中次数(默认 1)]，次数不对就不换。
+// 原文要带上下文，只换显示文字；Cursor 拿来比较的几个 error 标签保持英文。
+const exactRules = (extra.exact ?? []).map(([from, to, count = 1]) => ({ from, to, count }));
 
 function checksum(buf) {
   return crypto.createHash('sha256').update(buf).digest('base64').replace(/=+$/, '');
@@ -70,7 +74,7 @@ if (process.argv.includes('--undo')) {
     if (fs.existsSync(backup)) before = fs.readFileSync(backup, 'utf8');
     else {
       // 没有备份时按改动规则反推：去掉末尾的翻译器，还原两个常量。
-      before = text.slice(0, text.indexOf(`\n;${MARK}`))
+      before = exactRules.reduce((s, r) => s.split(r.to).join(r.from), text.slice(0, text.indexOf(`\n;${MARK}`)))
         .replace(new RegExp(`([,{;\\s(][A-Za-z_$][\\w$]*)=${JSON.stringify(extra.literals['No-repo Automations'])}(?=[,;}])`, 'g'), '$1="No-repo Automations"')
         .replace(new RegExp(`([,{;\\s(][A-Za-z_$][\\w$]*)=${JSON.stringify(extra.literals['No Repo'])}(?=[,;}])`, 'g'), '$1="No Repo"');
     }
@@ -94,6 +98,16 @@ for (const name of process.argv.includes('--undo') ? [] : FILES) {
     if (!hits) continue;
     text = text.replace(re, replacement);
     console.log(`+ ${name} 替换 ${hits} 处：${re.source.slice(0, 40)}`);
+  }
+  if (name === 'workbench.glass.main.js') {
+    let done = 0;
+    for (const { from, to, count } of exactRules) {
+      const hits = text.split(from).length - 1;
+      if (hits !== count || text.includes(to)) { console.log(`! ${name} 中 ${from.slice(0, 50)} 出现 ${hits} 次（应为 ${count}），跳过`); failed = true; continue; }
+      text = text.split(from).join(to);
+      done++;
+    }
+    console.log(`+ ${name} 精确替换界面文字 ${done}/${exactRules.length} 条`);
   }
   // 语言包只换固定字段里的文字。补充译文里仍以英文留在程序里的整句，交给运行时
   // 按整段文字精确匹配翻译；只包含至少两个词的句子，避免误换按钮 ID 一类的短词。
