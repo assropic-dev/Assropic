@@ -180,8 +180,7 @@ extension BridgeStore {
             if (metadata["authMethod"] as? String)?.lowercased() == "social", let arn = metadata["profileArn"] as? String {
                 url.queryItems?.append(URLQueryItem(name: "profileArn", value: arn))
             }
-            let identity = QuotaParser.string(metadata["profileArn"]) ?? QuotaParser.string(metadata["clientId"]) ?? "KIRO_DEFAULT_MACHINE"
-            let machineID = SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
+            let machineID = KiroMachineID.derive(accountName: account.name, account: metadata)
             headers["x-amz-user-agent"] = "aws-sdk-js/1.0.34 KiroIDE-0.11.63-" + machineID
             headers["User-Agent"] = "aws-sdk-js/1.0.34 ua/2.1 os/other lang/js md/nodejs#20.11.0 api/codewhispererstreaming#1.0.34 m/E KiroIDE-0.11.63-" + machineID
             headers["amz-sdk-invocation-id"] = UUID().uuidString

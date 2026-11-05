@@ -32,6 +32,21 @@ struct KiroRuntimeTests {
         check(a["nickname"] as? String == "本机 Kiro" && a["apiRegion"] as? String == "us-east-1", "display name and API region are mapped")
         check(a["subscriptionTitle"] as? String == "KIRO PRO", "accounts get a provisional paid title so Opus routes before usage is read")
         check((a["machineId"] as? String)?.count == 64, "a stable 64-hex machine id is derived")
+        // Kiro social logins all carry the same public profileArn; that must not merge their device identity.
+        var twin = social; twin["refreshToken"] = "refresh-c"; twin["refresh_token"] = "refresh-c"
+        var twinIDs: [String: UInt64] = [:]
+        let twins = KiroRuntimeCredentials.document(accounts: [("a.json", social), ("c.json", twin)], ids: &twinIDs)
+        check(Set(twins.compactMap { $0["machineId"] as? String }).count == 2,
+              "two social accounts sharing one profileArn get different machine ids")
+        var rotatedSocial = social; rotatedSocial["refreshToken"] = "refresh-new"; rotatedSocial["refresh_token"] = "refresh-new"
+        check(KiroMachineID.derive(accountName: "a.json", account: rotatedSocial) == a["machineId"] as? String,
+              "the machine id survives token rotation and re-login")
+        check(KiroMachineID.derive(accountName: "a.json", account: social) == KiroMachineID.derive(accountName: "a.json", account: ["refresh_token": "other"]),
+              "kiro2cc and the quota request derive the same id for one account")
+        var pinned = social; pinned["machineId"] = String(repeating: "AB", count: 32)
+        check(KiroMachineID.derive(accountName: "a.json", account: pinned) == String(repeating: "ab", count: 32)
+              && KiroMachineID.derive(accountName: "a.json", account: ["machineId": "short"]) == a["machineId"] as? String,
+              "a valid machineId in the account wins and an invalid one is ignored")
         check(b["authMethod"] as? String == "idc" && b["clientSecret"] as? String == "secret" && b["authRegion"] as? String == "us-east-1",
               "IdC accounts keep client registration and auth region")
         check(b["disabled"] as? Bool == true && b["priority"] as? Int == 3 && b["proxyUrl"] as? String == "direct",
@@ -111,6 +126,9 @@ struct KiroRuntimeTests {
         let toggled = KiroRuntimeChange.between(old: ["a": base1, "b": base2], new: ["a": a1Prio, "b": b2Off])
         check(toggled.disabled == ["b": true] && toggled.priority == ["a": 4] && toggled.updated.isEmpty && !toggled.needsRestart,
               "disabling and reprioritising are applied live")
+        var newMachine = base1; newMachine["machineId"] = String(repeating: "c", count: 64)
+        check(KiroRuntimeChange.between(old: ["a": base1], new: ["a": newMachine]).updated == ["a"],
+              "a changed machine id is pushed to kiro2cc as an update")
         let added = KiroRuntimeChange.between(old: ["a": base1], new: ["a": base1, "b": base2])
         check(added.added == ["b"] && added.removed.isEmpty && !added.needsRestart, "a new account is added live")
         let removed = KiroRuntimeChange.between(old: ["a": base1, "b": base2], new: ["a": base1])

@@ -1,6 +1,21 @@
 import Foundation
 import CryptoKit
 
+/// The machine id each Kiro account presents upstream, shared by kiro2cc's credentials
+/// and the quota request so both look like the same device for one account.
+enum KiroMachineID {
+    /// Every Kiro social login carries the same public profileArn, so it cannot tell
+    /// accounts apart. The BridgeDock account file name is unique per account and
+    /// survives token rotation and re-login; a 64-hex `machineId` in the account wins.
+    static func derive(accountName: String, account: [String: Any]) -> String {
+        if let explicit = (account["machineId"] ?? account["machine_id"]) as? String,
+           explicit.range(of: "^[0-9a-fA-F]{64}$", options: .regularExpression) != nil {
+            return explicit.lowercased()
+        }
+        return SHA256.hash(data: Data(("BridgeDock-Kiro/" + accountName).utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
 /// BridgeDock's `accounts/` files stay the source of truth for Kiro logins, which
 /// the core plugin still creates and lists. kiro2cc-proxy serves the inference
 /// because it relays upstream events as they arrive; the plugin buffers whole replies.
@@ -32,9 +47,7 @@ enum KiroRuntimeCredentials {
             if let region = string(value["idcRegion"]) { entry["authRegion"] = region }
             if let priority = (value["priority"] as? NSNumber)?.intValue, priority >= 0 { entry["priority"] = priority }
             if let proxy = string(value["proxy_url"]) { entry["proxyUrl"] = proxy }
-            // A stable per-account machine id, matching the quota request's identity.
-            let identity = string(value["profileArn"]) ?? string(value["clientId"]) ?? refresh
-            entry["machineId"] = SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
+            entry["machineId"] = KiroMachineID.derive(accountName: account.name, account: value)
             return entry
         }
     }
@@ -160,7 +173,7 @@ struct KiroRuntimeChange: Equatable {
 
     /// Identity fields; changing one means the credential itself is different.
     static let identityFields = ["refreshToken", "authMethod", "clientId", "clientSecret", "profileArn", "authRegion",
-                                 "apiRegion", "proxyUrl", "email", "nickname"]
+                                 "apiRegion", "proxyUrl", "machineId", "email", "nickname"]
     /// Fields an update cannot clear once set.
     static let unclearableFields = ["clientId", "clientSecret", "authRegion", "apiRegion"]
 
