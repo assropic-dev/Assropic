@@ -18,8 +18,8 @@ enum KiroRuntimeCredentials {
             if let known = ids[account.name] { id = known } else { id = next; ids[account.name] = next; next += 1 }
             var entry: [String: Any] = ["id": id, "refreshToken": refresh, "authMethod": authMethod(value),
                                         "disabled": value["disabled"] as? Bool ?? false,
-                                        // Opus is only routed to accounts with a known paid plan. The
-                                        // real title replaces this once kiro2cc reads the usage limits.
+                                        // Display only: Vendor/Kiro2ccFreeOpus.patch lets every plan, Free
+                                        // included, take Opus. kiro2cc replaces it with the real title.
                                         "subscriptionTitle": string(value["subscriptionTitle"]) ?? "KIRO PRO",
                                         "thinkingAdaptive": true]
             if let token = string(value["accessToken"]) ?? string(value["access_token"]) { entry["accessToken"] = token }

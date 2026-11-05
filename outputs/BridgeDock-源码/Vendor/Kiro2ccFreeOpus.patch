@@ -1,0 +1,161 @@
+diff --git a/src/kiro/model/credentials/methods.rs b/src/kiro/model/credentials/methods.rs
+index 9f77389..3d07cdb 100644
+--- a/src/kiro/model/credentials/methods.rs
++++ b/src/kiro/model/credentials/methods.rs
+@@ -171,11 +171,10 @@ impl KiroCredentials {
+ 
+     /// 检查账号是否支持 Opus 模型
+     ///
+-    /// Free 或订阅等级未知的账号不支持 Opus，需要明确的非 Free 订阅
++    /// BridgeDock 补丁：Kiro Free 账号同样可以调用 Opus（上游 ListAvailableModels 也会列出），
++    /// 不再按订阅名排除。某个账号上游确实不提供 Opus 时，由按账号可用模型的路由过滤
++    /// （model_support.rs）排除，这里不再预判。
+     pub fn supports_opus(&self) -> bool {
+-        self.subscription_title.as_deref().is_some_and(|title| {
+-            let title = title.trim();
+-            !title.is_empty() && !title.to_uppercase().contains("FREE")
+-        })
++        true
+     }
+ }
+diff --git a/src/kiro/model/credentials/tests.rs b/src/kiro/model/credentials/tests.rs
+index 9f2cd4a..de14809 100644
+--- a/src/kiro/model/credentials/tests.rs
++++ b/src/kiro/model/credentials/tests.rs
+@@ -12,13 +12,13 @@ mod tests {
+     use crate::model::config::Config;
+ 
+     #[test]
+-    fn test_supports_opus_requires_known_non_free_subscription() {
++    fn test_supports_opus_for_every_subscription() {
+         let cases = [
+-            (None, false),
+-            (Some(""), false),
+-            (Some("   "), false),
+-            (Some("KIRO FREE"), false),
+-            (Some("  Kiro Free  "), false),
++            (None, true),
++            (Some(""), true),
++            (Some("   "), true),
++            (Some("KIRO FREE"), true),
++            (Some("  Kiro Free  "), true),
+             (Some("KIRO PRO"), true),
+             (Some("Kiro Pro+"), true),
+             (Some("ENTERPRISE"), true),
+diff --git a/src/kiro/token_manager/tests/recovery.rs b/src/kiro/token_manager/tests/recovery.rs
+index 8f3e7d1..2ddeaee 100644
+--- a/src/kiro/token_manager/tests/recovery.rs
++++ b/src/kiro/token_manager/tests/recovery.rs
+@@ -201,7 +201,7 @@ pub(crate) mod tests {
+     }
+ 
+     #[tokio::test]
+-    async fn test_unknown_subscription_is_excluded_only_for_opus() {
++    async fn test_unknown_subscription_is_not_excluded_for_opus() {
+         let mut unknown = make_valid_cred("unknown-token");
+         unknown.priority = 0;
+         unknown.subscription_title = None;
+@@ -224,11 +224,11 @@ pub(crate) mod tests {
+             .acquire_context(Some("claude-opus-4-7"))
+             .await
+             .unwrap();
+-        assert_eq!(opus.id, 2);
++        assert_eq!(opus.id, 1);
+     }
+ 
+     #[tokio::test]
+-    async fn test_priority_current_id_excludes_free_account_for_opus() {
++    async fn test_priority_current_id_keeps_free_account_for_opus() {
+         let mut free = make_valid_cred("free-token");
+         free.priority = 0;
+         free.subscription_title = Some("KIRO FREE".to_string());
+@@ -246,7 +246,7 @@ pub(crate) mod tests {
+             .await
+             .unwrap();
+ 
+-        assert_eq!(context.id, 2);
++        assert_eq!(context.id, 1);
+     }
+ 
+     #[test]
+@@ -315,10 +315,9 @@ pub(crate) mod tests {
+     }
+ 
+     #[test]
+-    fn test_describe_unavailable_model_scoped_excludes_non_opus_accounts() {
+-        // C1 回归：opus 专属账号全部额度耗尽，但池中还有一个不支持 opus 的
+-        // 健康账号时，不传 model 会被健康账号稀释掉 quota 计数，永远触发不了
+-        // 402 标记；传入 model 后必须正确排除不相关账号，判定为全部耗尽。
++    fn test_describe_unavailable_free_account_still_serves_opus() {
++        // BridgeDock 补丁：FREE 账号也能调用 Opus，一个 PRO 账号额度耗尽时，
++        // 健康的 FREE 账号仍可承接 Opus，不能判定为全部耗尽。
+         let config = Config::default();
+         let mut opus_cred = make_valid_cred("opus1");
+         opus_cred.subscription_title = Some("KIRO PRO".to_string());
+@@ -338,16 +337,16 @@ pub(crate) mod tests {
+ 
+         let msg_opus = manager.describe_unavailable(Some("claude-opus-4-7"), &[]);
+         assert!(
+-            msg_opus.contains(QUOTA_EXHAUSTED_ALL_MARKER),
+-            "opus model 过滤后应排除不支持 opus 的账号，判定为全部耗尽，实际: {}",
++            !msg_opus.contains(QUOTA_EXHAUSTED_ALL_MARKER),
++            "FREE 账号可承接 opus，不应判定为全部耗尽，实际: {}",
+             msg_opus
+         );
+     }
+ 
+     #[test]
+-    fn test_describe_unavailable_no_matching_model_returns_zero_total() {
+-        // total==0 分支：scope 内所有账号（而非部分）都不支持该模型，
+-        // 必须走"没有支持该模型的账号"分支，不能误报额度耗尽标记。
++    fn test_describe_unavailable_free_only_pool_supports_opus() {
++        // BridgeDock 补丁：只有 FREE 账号时 Opus 也有可用账号，
++        // 不能再走"没有支持该模型的账号"分支，也不能误报额度耗尽标记。
+         let config = Config::default();
+         let mut free_cred = make_valid_cred("free1");
+         free_cred.subscription_title = Some("FREE".to_string());
+@@ -360,8 +359,8 @@ pub(crate) mod tests {
+             msg
+         );
+         assert!(
+-            msg.contains("没有支持该模型的账号"),
+-            "应走 total==0 分支提示无匹配模型账号，实际: {}",
++            !msg.contains("没有支持该模型的账号"),
++            "FREE 账号支持 opus，不应提示无匹配模型账号，实际: {}",
+             msg
+         );
+     }
+diff --git a/src/kiro/token_manager/tests/sticky.rs b/src/kiro/token_manager/tests/sticky.rs
+index fdf1dd1..46c241b 100644
+--- a/src/kiro/token_manager/tests/sticky.rs
++++ b/src/kiro/token_manager/tests/sticky.rs
+@@ -287,7 +287,7 @@ pub(crate) mod tests {
+     }
+ 
+     #[tokio::test]
+-    async fn test_sticky_cache_excludes_free_account_for_opus() {
++    async fn test_sticky_cache_keeps_free_account_for_opus() {
+         let mut free = make_valid_cred("free-token");
+         free.priority = 0;
+         free.subscription_title = Some("KIRO FREE".to_string());
+@@ -321,16 +321,17 @@ pub(crate) mod tests {
+             .await
+             .unwrap();
+ 
+-        assert_eq!(opus.id, 2);
++        // BridgeDock 补丁：FREE 账号也能调用 Opus，会话留在原账号，不产生 miss。
++        assert_eq!(opus.id, 1);
+         assert_eq!(
+             manager
+                 .sticky_cache
+                 .lock()
+                 .get("session-model-filter")
+                 .map(|entry| entry.credential_id),
+-            Some(2)
++            Some(1)
+         );
+         let (_, misses_after) = manager.sticky_metrics();
+-        assert_eq!(misses_after, misses_before + 1);
++        assert_eq!(misses_after, misses_before);
+     }
+ }

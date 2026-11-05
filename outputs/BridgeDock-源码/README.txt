@@ -206,6 +206,9 @@ https://github.com/TsinHzl/kiro2cc-proxy/tree/e5387453c10a87e350fbe2d7c6505a1b12
 源码压缩包 SHA-256
 b2e35fd35b9daeaffaa290298d4d64c18cb00387631868eee4745c9218200ec9
 Vendor/kiro2cc-proxy 由 Vendor/build-kiro2cc.sh 编译，构建时运行上游测试；
+打上 Vendor/Kiro2ccFreeOpus.patch：上游按订阅名把 KIRO FREE 账号排除在 Opus 之外，而 Free 账号
+实际可以调用 Opus 5.5，补丁去掉这条限制，Opus 请求也在所有账号间轮流。某账号上游确实不提供
+某模型时，仍由 kiro2cc 按各账号 ListAvailableModels 结果的路由过滤排除；
 内置管理网页用空页面替代，BridgeDock 不使用它。
 运行方式：
 • 内核启动后，BridgeDock 把 accounts/ 中的 Kiro 账号转换成 kiro-runtime/credentials.json，
