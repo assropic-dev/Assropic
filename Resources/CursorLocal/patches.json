@@ -1,0 +1,329 @@
+{
+  "version": "3.27.22",
+  "files": [
+    {
+      "name": "workbench.desktop.main.js",
+      "patches": [
+        {
+          "find": "async refreshDefaultModels(){",
+          "replace": "async refreshDefaultModels(){globalThis.__bridgeDockRestoreModels(this);if(globalThis.__bridgeDockLocal){await globalThis.__bridgeDockRefreshModels(this,Kbt);return;}",
+          "previousReplacements": [
+            "async refreshDefaultModels(){if(globalThis.__bridgeDockLocal){await globalThis.__bridgeDockRefreshModels(this,Kbt);return;}"
+          ]
+        },
+        {
+          "find": "localMode:!1,restoresStoredServer:",
+          "replace": "localMode:!!globalThis.__bridgeDockLocal,restoresStoredServer:"
+        },
+        {
+          "find": "this.refreshToken=()=>this.storageService.get(\"cursorAuth/refreshToken\",-1)",
+          "replace": "this.refreshToken=()=>globalThis.__bridgeDockLocal?.token??this.storageService.get(\"cursorAuth/refreshToken\",-1)"
+        },
+        {
+          "find": "this.accessToken=()=>this.isSessionWithheld()?void 0:this.heldAccessToken()",
+          "replace": "this.accessToken=()=>globalThis.__bridgeDockLocal?.token??(this.isSessionWithheld()?void 0:this.heldAccessToken())"
+        },
+        {
+          "find": "isAuthenticated(){const e=this.accessToken()",
+          "replace": "isAuthenticated(){if(globalThis.__bridgeDockLocal)return true;const e=this.accessToken()"
+        },
+        {
+          "find": "async getEmailAndSignUpType(){",
+          "replace": "async getEmailAndSignUpType(){if(globalThis.__bridgeDockLocal)return {email:globalThis.__bridgeDockLocal.email,signUpType:\"unknown\"};"
+        },
+        {
+          "find": "this.getCachedAccountProfile=()=>{",
+          "replace": "this.getCachedAccountProfile=()=>{if(globalThis.__bridgeDockLocal)return {authId:globalThis.__bridgeDockLocal.id,displayName:globalThis.__bridgeDockLocal.name};"
+        },
+        {
+          "find": "this.refreshAccessToken=async(Y=!1)=>{",
+          "replace": "this.refreshAccessToken=async(Y=!1)=>{if(globalThis.__bridgeDockLocal)return;"
+        },
+        {
+          "find": "this.refreshMembership=async Y=>{",
+          "replace": "this.refreshMembership=async Y=>{if(globalThis.__bridgeDockLocal)return;"
+        },
+        {
+          "find": "async getAccessToken(){this.authDebugLog",
+          "replace": "async getAccessToken(){if(globalThis.__bridgeDockLocal)return globalThis.__bridgeDockLocal.token;this.authDebugLog"
+        },
+        {
+          "find": "async getLocalAgentProviderConfig(e,t){",
+          "replace": "async getLocalAgentProviderConfig(e,t){if(globalThis.__bridgeDockLocal)return {baseUrl:globalThis.__bridgeDockLocal.baseURL,apiKey:globalThis.__bridgeDockLocal.key,customHeaders:globalThis.__bridgeDockParameterHeaders()};",
+          "previousReplacements": [
+            "async getLocalAgentProviderConfig(e,t){if(globalThis.__bridgeDockLocal)return {baseUrl:globalThis.__bridgeDockLocal.baseURL,apiKey:globalThis.__bridgeDockLocal.key};"
+          ]
+        },
+        {
+          "find": "async getLocalInferenceProviderConfig(){",
+          "replace": "async getLocalInferenceProviderConfig(){if(globalThis.__bridgeDockLocal)return {baseUrl:globalThis.__bridgeDockLocal.baseURL,apiKey:globalThis.__bridgeDockLocal.key,customHeaders:globalThis.__bridgeDockParameterHeaders(),userAgent:\"Assropic\",modelId:globalThis.__bridgeDockLocal.model};",
+          "previousReplacements": [
+            "async getLocalInferenceProviderConfig(){if(globalThis.__bridgeDockLocal)return {baseUrl:globalThis.__bridgeDockLocal.baseURL,apiKey:globalThis.__bridgeDockLocal.key,userAgent:\"Assropic\",modelId:globalThis.__bridgeDockLocal.model};"
+          ]
+        },
+        {
+          "find": "get skipOnboarding(){return this.payload",
+          "replace": "get skipOnboarding(){if(globalThis.__bridgeDockLocal)return true;return this.payload"
+        },
+        {
+          "find": "this.getCurrentAuthId=()=>{",
+          "replace": "this.getCurrentAuthId=()=>{if(globalThis.__bridgeDockLocal)return globalThis.__bridgeDockLocal.id;"
+        },
+        {
+          "find": "this.getScopedDashboardProfile=async Y=>{",
+          "replace": "this.getScopedDashboardProfile=async Y=>{if(globalThis.__bridgeDockLocal)return {firstName:globalThis.__bridgeDockLocal.name,lastName:\"\",teamName:\"\",authId:globalThis.__bridgeDockLocal.id,email:globalThis.__bridgeDockLocal.email};"
+        },
+        {
+          "find": "getEffectiveCredentials(){",
+          "replace": "getEffectiveCredentials(){if(globalThis.__bridgeDockLocal)return globalThis.__bridgeDockCredentials(this.reactiveStorageService.applicationUserPersistentStorage.cursorCreds);"
+        },
+        {
+          "find": "clearLocalSession(e){",
+          "replace": "clearLocalSession(e){if(globalThis.__bridgeDockLocal)return;"
+        },
+        {
+          "find": "this.storeAccessRefreshToken=(o,a)=>{",
+          "replace": "this.storeAccessRefreshToken=(o,a)=>{if(globalThis.__bridgeDockLocal)return;"
+        },
+        {
+          "find": "this.storeEmailAndSignUpType=(o,a)=>{",
+          "replace": "this.storeEmailAndSignUpType=(o,a)=>{if(globalThis.__bridgeDockLocal)return;"
+        },
+        {
+          "find": "this.clearStoredEmailAndSignUpType=()=>{",
+          "replace": "this.clearStoredEmailAndSignUpType=()=>{if(globalThis.__bridgeDockLocal)return;"
+        },
+        {
+          "find": "function pCt(e){",
+          "replace": "function pCt(e){e=globalThis.__bridgeDockModelSection(e);"
+        },
+        {
+          "find": "function oMu(e,t){",
+          "replace": "function oMu(e,t){if(globalThis.__bridgeDockModelMatches(e,t))return!0;"
+        },
+        {
+          "find": "function r2u(e){",
+          "replace": "function r2u(e){e=globalThis.__bridgeDockPickerLayout(e);"
+        },
+        {
+          "find": "y.current=n,!M&&n&&c()",
+          "replace": "y.current=n,!M&&n&&(c(),globalThis.__bridgeDockSyncModels())"
+        },
+        {
+          "find": "{searchPlaceholder:\"Search models\",noModelsFound:\"No models found\",modelSelection:\"Model selection\",countOptions:\"Count options\",restoreDefaultParameters:\"Restore default parameters\",editParameters:\"Edit\"}",
+          "replace": "globalThis.__bridgeDockPickerLabels({searchPlaceholder:\"Search models\",noModelsFound:\"No models found\",modelSelection:\"Model selection\",countOptions:\"Count options\",restoreDefaultParameters:\"Restore default parameters\",editParameters:\"Edit\"})"
+        },
+        {
+          "find": "computeAvailableDefaultModels(){",
+          "replace": "computeAvailableDefaultModels(){if(globalThis.__bridgeDockLocal){this.reactiveStorageService.availableModelsCatalogRevision();return(this.reactiveStorageService.applicationUserPersistentStorage.availableDefaultModels2??[]).map(Osp);}"
+        },
+        {
+          "find": "function d3p({active:e,compactModelIds:t}){",
+          "replace": "function d3p({active:e,compactModelIds:t}){e=globalThis.__bridgeDockParameterMenu(e);"
+        }
+      ]
+    },
+    {
+      "name": "workbench.glass.main.js",
+      "patches": [
+        {
+          "find": "async refreshDefaultModels(){",
+          "replace": "async refreshDefaultModels(){globalThis.__bridgeDockRestoreModels(this);if(globalThis.__bridgeDockLocal){await globalThis.__bridgeDockRefreshModels(this,q$t);return;}",
+          "previousReplacements": [
+            "async refreshDefaultModels(){if(globalThis.__bridgeDockLocal){await globalThis.__bridgeDockRefreshModels(this,q$t);return;}"
+          ]
+        },
+        {
+          "find": "localMode:!1,restoresStoredServer:",
+          "replace": "localMode:!!globalThis.__bridgeDockLocal,restoresStoredServer:"
+        },
+        {
+          "find": "this.refreshToken=()=>this.storageService.get(\"cursorAuth/refreshToken\",-1)",
+          "replace": "this.refreshToken=()=>globalThis.__bridgeDockLocal?.token??this.storageService.get(\"cursorAuth/refreshToken\",-1)"
+        },
+        {
+          "find": "this.accessToken=()=>this.isSessionWithheld()?void 0:this.heldAccessToken()",
+          "replace": "this.accessToken=()=>globalThis.__bridgeDockLocal?.token??(this.isSessionWithheld()?void 0:this.heldAccessToken())"
+        },
+        {
+          "find": "isAuthenticated(){const t=this.accessToken()",
+          "replace": "isAuthenticated(){if(globalThis.__bridgeDockLocal)return true;const t=this.accessToken()"
+        },
+        {
+          "find": "async getEmailAndSignUpType(){",
+          "replace": "async getEmailAndSignUpType(){if(globalThis.__bridgeDockLocal)return {email:globalThis.__bridgeDockLocal.email,signUpType:\"unknown\"};"
+        },
+        {
+          "find": "this.getCachedAccountProfile=()=>{",
+          "replace": "this.getCachedAccountProfile=()=>{if(globalThis.__bridgeDockLocal)return {authId:globalThis.__bridgeDockLocal.id,displayName:globalThis.__bridgeDockLocal.name};"
+        },
+        {
+          "find": "this.refreshAccessToken=async(G=!1)=>{",
+          "replace": "this.refreshAccessToken=async(G=!1)=>{if(globalThis.__bridgeDockLocal)return;"
+        },
+        {
+          "find": "this.refreshMembership=async G=>{",
+          "replace": "this.refreshMembership=async G=>{if(globalThis.__bridgeDockLocal)return;"
+        },
+        {
+          "find": "async getAccessToken(){this.authDebugLog",
+          "replace": "async getAccessToken(){if(globalThis.__bridgeDockLocal)return globalThis.__bridgeDockLocal.token;this.authDebugLog"
+        },
+        {
+          "find": "async getLocalAgentProviderConfig(t,e){",
+          "replace": "async getLocalAgentProviderConfig(t,e){if(globalThis.__bridgeDockLocal)return {baseUrl:globalThis.__bridgeDockLocal.baseURL,apiKey:globalThis.__bridgeDockLocal.key,customHeaders:globalThis.__bridgeDockParameterHeaders()};",
+          "previousReplacements": [
+            "async getLocalAgentProviderConfig(t,e){if(globalThis.__bridgeDockLocal)return {baseUrl:globalThis.__bridgeDockLocal.baseURL,apiKey:globalThis.__bridgeDockLocal.key};"
+          ]
+        },
+        {
+          "find": "async getLocalInferenceProviderConfig(){",
+          "replace": "async getLocalInferenceProviderConfig(){if(globalThis.__bridgeDockLocal)return {baseUrl:globalThis.__bridgeDockLocal.baseURL,apiKey:globalThis.__bridgeDockLocal.key,customHeaders:globalThis.__bridgeDockParameterHeaders(),userAgent:\"Assropic\",modelId:globalThis.__bridgeDockLocal.model};",
+          "previousReplacements": [
+            "async getLocalInferenceProviderConfig(){if(globalThis.__bridgeDockLocal)return {baseUrl:globalThis.__bridgeDockLocal.baseURL,apiKey:globalThis.__bridgeDockLocal.key,userAgent:\"Assropic\",modelId:globalThis.__bridgeDockLocal.model};"
+          ]
+        },
+        {
+          "find": "get skipOnboarding(){return this.payload",
+          "replace": "get skipOnboarding(){if(globalThis.__bridgeDockLocal)return true;return this.payload"
+        },
+        {
+          "find": "this.getCurrentAuthId=()=>{",
+          "replace": "this.getCurrentAuthId=()=>{if(globalThis.__bridgeDockLocal)return globalThis.__bridgeDockLocal.id;"
+        },
+        {
+          "find": "this.getScopedDashboardProfile=async G=>{",
+          "replace": "this.getScopedDashboardProfile=async G=>{if(globalThis.__bridgeDockLocal)return {firstName:globalThis.__bridgeDockLocal.name,lastName:\"\",teamName:\"\",authId:globalThis.__bridgeDockLocal.id,email:globalThis.__bridgeDockLocal.email};"
+        },
+        {
+          "find": "getEffectiveCredentials(){",
+          "replace": "getEffectiveCredentials(){if(globalThis.__bridgeDockLocal)return globalThis.__bridgeDockCredentials(this.reactiveStorageService.applicationUserPersistentStorage.cursorCreds);"
+        },
+        {
+          "find": "clearLocalSession(t){",
+          "replace": "clearLocalSession(t){if(globalThis.__bridgeDockLocal)return;"
+        },
+        {
+          "find": "this.storeAccessRefreshToken=(o,a)=>{",
+          "replace": "this.storeAccessRefreshToken=(o,a)=>{if(globalThis.__bridgeDockLocal)return;"
+        },
+        {
+          "find": "this.storeEmailAndSignUpType=(o,a)=>{",
+          "replace": "this.storeEmailAndSignUpType=(o,a)=>{if(globalThis.__bridgeDockLocal)return;"
+        },
+        {
+          "find": "this.clearStoredEmailAndSignUpType=()=>{",
+          "replace": "this.clearStoredEmailAndSignUpType=()=>{if(globalThis.__bridgeDockLocal)return;"
+        },
+        {
+          "find": "function xBx(t){",
+          "replace": "function xBx(t){if(globalThis.__bridgeDockLocal){const header=t.agentHeader??t.fallbackHeader;const environment=header?.targetEnvironment.type===\"existing\"?header.targetEnvironment:{type:\"existing\",environment:t.homeWorkspaceIdentifier};return UQ(environment,t.cloudProjects,t.workspaceMetadataService,[]);}"
+        },
+        {
+          "find": "isEnabled(){return this._spaceXModeService.state.kind!==\"off\"}",
+          "replace": "isEnabled(){if(globalThis.__bridgeDockLocal)return false;return this._spaceXModeService.state.kind!==\"off\"}"
+        },
+        {
+          "find": "getLastNewProjectRuntime(){return this._lastNewProjectRuntime}",
+          "replace": "getLastNewProjectRuntime(){if(globalThis.__bridgeDockLocal)return \"local\";return this._lastNewProjectRuntime}"
+        },
+        {
+          "find": "function OYt(t){",
+          "replace": "function OYt(t){t=globalThis.__bridgeDockModelSection(t);"
+        },
+        {
+          "find": "function aVp(t,e){",
+          "replace": "function aVp(t,e){if(globalThis.__bridgeDockModelMatches(t,e))return!0;"
+        },
+        {
+          "find": "function aZp(t){",
+          "replace": "function aZp(t){t=globalThis.__bridgeDockPickerLayout(t);"
+        },
+        {
+          "find": "b.current=n,!T&&n&&l()",
+          "replace": "b.current=n,!T&&n&&(l(),globalThis.__bridgeDockSyncModels())"
+        },
+        {
+          "find": "{searchPlaceholder:\"Search models\",noModelsFound:\"No models found\",modelSelection:\"Model selection\",countOptions:\"Count options\",restoreDefaultParameters:\"Restore default parameters\",editParameters:\"Edit\"}",
+          "replace": "globalThis.__bridgeDockPickerLabels({searchPlaceholder:\"Search models\",noModelsFound:\"No models found\",modelSelection:\"Model selection\",countOptions:\"Count options\",restoreDefaultParameters:\"Restore default parameters\",editParameters:\"Edit\"})"
+        },
+        {
+          "find": "computeAvailableDefaultModels(){",
+          "replace": "computeAvailableDefaultModels(){if(globalThis.__bridgeDockLocal){this.reactiveStorageService.availableModelsCatalogRevision();return(this.reactiveStorageService.applicationUserPersistentStorage.availableDefaultModels2??[]).map(Yug);}"
+        },
+        {
+          "find": "function $tv({active:t,compactModelIds:e}){",
+          "replace": "function $tv({active:t,compactModelIds:e}){t=globalThis.__bridgeDockParameterMenu(t);"
+        }
+      ]
+    },
+    {
+      "name": "extensions/cursor-agent-exec/dist/main.js",
+      "scope": "app",
+      "patches": [
+        {
+          "find": "configuredEffortValues:e.configuredEffortValues,requestLogMetadata:e.requestLogMetadata",
+          "replace": "configuredEffortValues:e.configuredEffortValues??(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"1\"?s.reasoningEffortValues??[\"low\",\"medium\",\"high\",\"xhigh\",\"max\"]:void 0),requestLogMetadata:e.requestLogMetadata"
+        },
+        {
+          "find": "async function Ize(e){",
+          "replace": "async function Ize(e){if(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"0\")e={...e,modelParameters:e.modelParameters?.filter(p=>![\"context\",\"reasoning\",\"effort\",\"thought_level\",\"fast\",\"thinking\",\"provider\"].includes(p.id))};if(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"1\")e={...e,customHeaders:{...e.customHeaders,\"X-BridgeDock-Parameters\":encodeURIComponent(JSON.stringify(e.modelParameters??[]))}};",
+          "previousReplacements": [
+            "async function Ize(e){if(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"0\")e={...e,modelParameters:e.modelParameters?.filter(p=>![\"context\",\"reasoning\",\"effort\",\"thought_level\"].includes(p.id))};",
+            "async function Ize(e){if(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"0\")e={...e,modelParameters:e.modelParameters?.filter(p=>![\"context\",\"reasoning\",\"effort\",\"thought_level\",\"fast\",\"thinking\"].includes(p.id))};if(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"1\")e={...e,customHeaders:{...e.customHeaders,\"X-BridgeDock-Parameters\":encodeURIComponent(JSON.stringify(e.modelParameters??[]))}};"
+          ]
+        },
+        {
+          "find": "do not start with a verb; Title Case; no punctuation, quotes, or trailing period.\\nExamples:\\n",
+          "replace": "do not start with a verb; write the name in the same language as the user's message (a Chinese message gets a Chinese name) and use Title Case only for English; no punctuation, quotes, or trailing period.\\nExamples:\\nMessage: 帮我看看登录页为什么一直报错 -> <name>登录页报错排查</name>\\n"
+        },
+        {
+          "find": "systemPromptGenerator:rWe(e,n,s),toolsGenerator:",
+          "replace": "systemPromptGenerator:((g,l)=>{if(void 0===e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"])return g;const w=(a,b)=>{const v=g(a,b);return\"string\"==typeof v&&!v.includes(l)?v+l:v};w.__bridgeDockLanguage=l;return w})(rWe(e,n,s),\"\\n\\n<language_preference>\\n无论当前使用哪个模型，所有面向用户的输出都尽可能使用简体中文，包括回复、解释、进度说明、计划、总结、提问、思考摘要、代码注释、提交信息和生成的文档。代码、命令、文件路径、标识符、API 名称、日志和报错原文保持原样，不要翻译。用户明确要求使用其他语言时，以用户要求为准。\\n</language_preference>\"),toolsGenerator:"
+        },
+        {
+          "find": "i=t.systemPromptOverride?t.systemPromptOverride(o,s,{subagentInstanceId:n,baseSystemPromptGenerator:e.systemPromptGenerator}):e.systemPromptGenerator(o,s),a=t.systemReminder;",
+          "replace": "i=((v,l)=>l&&\"string\"==typeof v&&!v.includes(l)?v+l:v)(t.systemPromptOverride?t.systemPromptOverride(o,s,{subagentInstanceId:n,baseSystemPromptGenerator:e.systemPromptGenerator}):e.systemPromptGenerator(o,s),e.systemPromptGenerator.__bridgeDockLanguage),a=t.systemReminder;"
+        },
+        {
+          "find": "function exe(e){const t=e.trim();return t.length>0?t.split(/\\s+/).length:0}",
+          "replace": "function exe(e){const t=e.trim();return t.length>0?(t.match(/[\\u3040-\\u30ff\\u3400-\\u9fff\\uf900-\\ufaff\\uac00-\\ud7af]|[^\\s\\u3040-\\u30ff\\u3400-\\u9fff\\uf900-\\ufaff\\uac00-\\ud7af]+/g)||[]).length:0}"
+        }
+      ]
+    },
+    {
+      "name": "extensions/cursor-local-agent-runtime/dist/main.js",
+      "scope": "app",
+      "patches": [
+        {
+          "find": "configuredEffortValues:e.configuredEffortValues,requestLogMetadata:e.requestLogMetadata",
+          "replace": "configuredEffortValues:e.configuredEffortValues??(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"1\"?o.reasoningEffortValues??[\"low\",\"medium\",\"high\",\"xhigh\",\"max\"]:void 0),requestLogMetadata:e.requestLogMetadata"
+        },
+        {
+          "find": "async function j8e(e){",
+          "replace": "async function j8e(e){if(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"0\")e={...e,modelParameters:e.modelParameters?.filter(p=>![\"context\",\"reasoning\",\"effort\",\"thought_level\",\"fast\",\"thinking\",\"provider\"].includes(p.id))};if(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"1\")e={...e,customHeaders:{...e.customHeaders,\"X-BridgeDock-Parameters\":encodeURIComponent(JSON.stringify(e.modelParameters??[]))}};",
+          "previousReplacements": [
+            "async function j8e(e){if(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"0\")e={...e,modelParameters:e.modelParameters?.filter(p=>![\"context\",\"reasoning\",\"effort\",\"thought_level\"].includes(p.id))};",
+            "async function j8e(e){if(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"0\")e={...e,modelParameters:e.modelParameters?.filter(p=>![\"context\",\"reasoning\",\"effort\",\"thought_level\",\"fast\",\"thinking\"].includes(p.id))};if(e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"]===\"1\")e={...e,customHeaders:{...e.customHeaders,\"X-BridgeDock-Parameters\":encodeURIComponent(JSON.stringify(e.modelParameters??[]))}};"
+          ]
+        },
+        {
+          "find": "do not start with a verb; Title Case; no punctuation, quotes, or trailing period.\\nExamples:\\n",
+          "replace": "do not start with a verb; write the name in the same language as the user's message (a Chinese message gets a Chinese name) and use Title Case only for English; no punctuation, quotes, or trailing period.\\nExamples:\\nMessage: 帮我看看登录页为什么一直报错 -> <name>登录页报错排查</name>\\n"
+        },
+        {
+          "find": "systemPromptGenerator:w7e(e,r,o),toolsGenerator:",
+          "replace": "systemPromptGenerator:((g,l)=>{if(void 0===e.customHeaders?.[\"X-BridgeDock-Model-Parameters\"])return g;const w=(a,b)=>{const v=g(a,b);return\"string\"==typeof v&&!v.includes(l)?v+l:v};w.__bridgeDockLanguage=l;return w})(w7e(e,r,o),\"\\n\\n<language_preference>\\n无论当前使用哪个模型，所有面向用户的输出都尽可能使用简体中文，包括回复、解释、进度说明、计划、总结、提问、思考摘要、代码注释、提交信息和生成的文档。代码、命令、文件路径、标识符、API 名称、日志和报错原文保持原样，不要翻译。用户明确要求使用其他语言时，以用户要求为准。\\n</language_preference>\"),toolsGenerator:"
+        },
+        {
+          "find": "i=t.systemPromptOverride?t.systemPromptOverride(s,o,{subagentInstanceId:r,baseSystemPromptGenerator:e.systemPromptGenerator}):e.systemPromptGenerator(s,o),a=t.systemReminder;",
+          "replace": "i=((v,l)=>l&&\"string\"==typeof v&&!v.includes(l)?v+l:v)(t.systemPromptOverride?t.systemPromptOverride(s,o,{subagentInstanceId:r,baseSystemPromptGenerator:e.systemPromptGenerator}):e.systemPromptGenerator(s,o),e.systemPromptGenerator.__bridgeDockLanguage),a=t.systemReminder;"
+        },
+        {
+          "find": "function uLe(e){const t=e.trim();return t.length>0?t.split(/\\s+/).length:0}",
+          "replace": "function uLe(e){const t=e.trim();return t.length>0?(t.match(/[\\u3040-\\u30ff\\u3400-\\u9fff\\uf900-\\ufaff\\uac00-\\ud7af]|[^\\s\\u3040-\\u30ff\\u3400-\\u9fff\\uf900-\\ufaff\\uac00-\\ud7af]+/g)||[]).length:0}"
+        }
+      ]
+    }
+  ]
+}

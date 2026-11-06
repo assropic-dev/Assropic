@@ -3,9 +3,12 @@
 ._*
 __MACOSX/
 
-# 构建产物
-outputs/BridgeDock.app/
-outputs/*.zip
+# 构建产物与历史验收输出
+Assropic.app/
+Assropic-macOS-arm64.zip
+outputs/
+.build/
+.swiftpm/
 
 # 调研与测试临时目录
 work/
@@ -14,5 +17,5 @@ work/
 cursor-zh/vendor/
 
 # 验证与压测生成的结果
-outputs/BridgeDock-源码/bd-verify.log
-outputs/BridgeDock-源码/kiro-stress-result.json
+bd-verify.log
+kiro-stress-result.json
