@@ -1,7 +1,54 @@
-Assropic 1.4.22
+# Assropic
 
-Assropic 是原 BridgeDock 的新品牌名称。本次改名只更新应用外观、发行包和仓库名称；
+> **访问声明（项目安全政策）**
+>
+> 本项目虽然公开源代码，但明确禁止与 Anthropic 及其关联组织存在雇佣、代理、代表、内部项目或利益关系的人员访问、使用、复制、部署、二次分发或接入本工具。发现相关关联后，项目维护方可以暂停对应账号、设备和访问资格；如需申请解封，请联系安全团队。负责人：神明。
+>
+> 这项限制针对组织和业务关联，不针对任何受保护的人身属性。项目不会索取或公开与此无关的个人身份信息。
+
+Assropic 1.4.22 是原 BridgeDock 的新品牌名称。本次改名只更新应用外观、发行包和仓库名称；
 已有的 BridgeDock 数据目录、配置键、协议头和 Cursor 适配文件保持兼容，升级后无需重新登录。
+
+## 这个项目是什么
+
+Assropic 是面向 Apple Silicon Mac 的本地模型桥接与反代桌面应用。它把 Claude、GPT / Codex、Cursor、Kimi、Kiro、Grok、ZCode 以及普通 API Key 统一接入一个只监听 `127.0.0.1` 的本地网关，再把同一个模型目录和连接配置提供给 Cursor、Claude Code、Codex CLI、Kimi Code、ZCode、Kiro 扩展和其他 OpenAI / Anthropic 兼容客户端。
+
+所有账号凭据、模型开放范围、路由前缀、请求协议和出站代理都在本机管理。Assropic 不需要 Node、Python、Docker 或 Homebrew 才能运行；发行包已经带有需要的反代内核和插件。默认 OpenAI 兼容地址是 `http://127.0.0.1:18417/v1`，Anthropic 兼容地址是 `http://127.0.0.1:18417`。
+
+## 你可以用它做什么
+
+- 把官方 API Key、Coding Plan、订阅账号和第三方中转站集中在一个本地入口中，按渠道设置模型、别名、协议和代理。
+- 让多个 Claude、GPT / Codex、Kimi、Cursor、Grok 或 Kiro 账号组成账号池；新会话分散到不同账号，同一会话保持粘性，额度或认证失败时自动切换。
+- 在 Cursor 中开启 Assropic 反代，使用账号真实可用的模型目录、上下文档位、Fast、Thinking、Effort 和参数菜单；Cursor 更新后可重新核对补丁兼容性。
+- 为 Claude Desktop、Claude Code、Codex CLI、Kimi Code 和其他工具生成配置，应用前自动保存备份，恢复时核对文件摘要。
+- 通过 OpenAI Chat Completions、OpenAI Responses 和 Anthropic Messages 三种协议转发流式输出、工具调用、思考字段和图片请求。
+- 读取模型真实目录和账号额度，按渠道运行联通、流式、降智、长上下文和参数核验；失败时显示具体的上游、协议或权限原因。
+- 在本机登录 Sub2API 等中转站，列出分组和 Key，直接接入渠道，定时刷新余额并按规则替换由 Assropic 创建的失效 Key。
+- 导入 Claude Code、ChatGPT / Codex、Kiro、Kimi Code、Cursor 和 ZCode 的本机凭据；原始登录文件只读，规范化副本保存到 Assropic 私有数据目录。
+- 使用 CCBaga 模式记录 Claude 账号的独立环境偏好，或继续使用传统账号池和本地反代模式。
+
+## 技术架构
+
+- **桌面层**：SwiftUI + AppKit，负责账号、渠道、模型发布、额度、诊断、工具接入和 Cursor 开关。
+- **本地网关**：`Sources/ModelGateway.swift` 处理鉴权、模型发布、渠道前缀、协议转换、图片路由、参数换算和会话路由。
+- **上游核心**：内置 CLIProxyAPI，负责多数订阅和 API 服务商；Kiro 使用独立的 `kiro2cc-proxy` worker，按账号池和会话分配请求。
+- **Cursor 适配**：`Resources/CursorLocal/patches.json` 对 Cursor 3.27.22 的 workbench 与本地 Agent runtime 做精确、可逆的补丁；`runtime.js` 只通过本机 18418 会话端点读取当前模型和参数。
+- **数据边界**：主数据目录默认是 `~/Library/Application Support/BridgeDock`，保留旧路径、旧配置键和 `X-BridgeDock-*` 请求头以兼容原 BridgeDock 安装。
+- **验证方式**：`verify.sh` 会编译 Swift 测试、运行网关和 Kiro 回归、运行 Cursor JS 传输测试，并生成本地 ad-hoc 签名的 `Assropic.app`。
+
+## 开源依赖与来源
+
+| 组件 | 用途 | 来源与说明 |
+| --- | --- | --- |
+| CLIProxyAPI 8.0.53 | 主反代内核、账号登录、模型和额度接口 | [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)，许可证见 `Vendor/CLIProxyAPI-LICENSE` |
+| Cursor Agent v1 | Cursor Agent v1 Connect、本地 Cursor 账号和模型目录 | [enderzcx/cursor-agent2api](https://github.com/enderzcx/cursor-agent2api)，许可证与第三方声明见 `Vendor/Cursor-LICENSE`、`Vendor/Cursor-NOTICE` |
+| Kiro Plugin 0.1.1 | Kiro 登录、账号列表、额度和凭据刷新 | [xiaokui-dev/cliproxyapi-kiro-plugin](https://github.com/xiaokui-dev/cliproxyapi-kiro-plugin)，补丁和许可证见 `Vendor/KiroStreamChunks.patch`、`Vendor/Kiro-LICENSE` |
+| kiro2cc-proxy 3.5.1 | Kiro Claude 推理、流式输出、工具调用和 continuation 恢复 | [TsinHzl/kiro2cc-proxy](https://github.com/TsinHzl/kiro2cc-proxy/tree/e5387453c10a87e350fbe2d7c6505a1b128f5445)，许可证和本地补丁见 `Vendor/Kiro2cc-*` |
+| Kimi Work 参考 | Kimi Work 协议和桌面会话参考 | [keenlin/magpie-plugins](https://github.com/keenlin/magpie-plugins/tree/3e966bb4b5f21b9b3d1cbe6c4d15cca8fbf32fe9/packages/kimi-work)，说明见 `Vendor/KimiWork-NOTICE` |
+| ZCode prompt 数据 | ZCode 兼容提示词字段 | [zai-org/ZCode](https://github.com/zai-org/ZCode/tree/v3.14.3)，提取说明见 `Vendor/ZCode-NOTICE.md` |
+| Cursor 中文语言包 | Cursor 中文界面和补充翻译 | [polang233/cursor-language-pack](https://github.com/polang233/cursor-language-pack)，原包不提交到 Git，构建时按校验值下载 |
+
+Assropic 自己的 Swift 代码、Cursor 本地适配、账号池、模型网关和测试位于 `Sources/`、`Resources/`、`Tests/`；第三方二进制和补丁保留各自的许可证与 NOTICE。未列出的协议参考不会自动变成 Assropic 的代码依赖。
 
 面向 Apple Silicon Mac 的本地模型反代桌面应用。
 界面使用 SwiftUI，内置 CLIProxyAPI 8.0.53、Kiro Plugin 0.1.1 与 kiro2cc-proxy 3.5.1。
