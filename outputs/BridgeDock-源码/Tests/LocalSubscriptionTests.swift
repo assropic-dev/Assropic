@@ -140,6 +140,27 @@ struct LocalSubscriptionTests {
         try write(["oauthAccount": ["accountUuid": "custom-account", "emailAddress": "custom@example.invalid"]], to: customClaude.appendingPathComponent(".claude.json"))
         let customClaudeIdentity = try LocalSubscriptionCredentials.load(provider: "claude", home: home, environment: ["CLAUDE_CONFIG_DIR": customClaude.path], keychainReader: { try data(claude) })
         check(try object(customClaudeIdentity.data)["account_id"] as? String == "custom-account", "Custom Claude config directories use their own account metadata")
+        let desktopHome = home.appendingPathComponent("desktop-only")
+        let desktopProcesses = Data("""
+        100 /Users/fixture/Library/Application Support/Claude/claude-code/2.1.317/abc/claude.app/Contents/MacOS/claude CLAUDE_CODE_ENTRYPOINT=claude-desktop CLAUDE_CODE_OAUTH_TOKEN=desktop-access CLAUDE_CODE_ACCOUNT_UUID=desktop-account CLAUDE_CODE_USER_EMAIL=desktop@example.invalid CLAUDE_CODE_SUBSCRIPTION_TYPE=max CLAUDE_CODE_RATE_LIMIT_TIER=default_claude_max_5x CLAUDE_CODE_OAUTH_SCOPES=user:inference
+        101 /Users/fixture/Library/Application Support/Claude/claude-code/2.1.317/abc/claude.app/Contents/MacOS/claude CLAUDE_CODE_ENTRYPOINT=claude-desktop CLAUDE_CODE_OAUTH_TOKEN=desktop-access CLAUDE_CODE_ACCOUNT_UUID=desktop-account CLAUDE_CODE_USER_EMAIL=desktop@example.invalid
+        102 /Users/fixture/Library/Application Support/Claude/claude-code/2.1.317/def/claude.app/Contents/MacOS/claude CLAUDE_CODE_ENTRYPOINT=claude CLAUDE_CODE_OAUTH_TOKEN=cli-only
+        103 /Users/fixture/Library/Application Support/Claude/claude-code/2.1.317/ghi/claude.app/Contents/MacOS/claude CLAUDE_CODE_ENTRYPOINT=claude-desktop CLAUDE_CODE_OAUTH_TOKEN=second-desktop-access CLAUDE_CODE_ACCOUNT_UUID=second-desktop-account
+        """.utf8)
+        let desktopAccounts = try LocalSubscriptionCredentials.loadAll(provider: "claude", home: desktopHome,
+            environment: [:], keychainReader: { nil }, desktopProcessReader: { desktopProcesses })
+        check(desktopAccounts.count == 2, "Claude Desktop process reader imports distinct running accounts")
+        check(desktopAccounts.allSatisfy { $0.source.contains("Claude Desktop") }, "Claude Desktop credentials identify their source")
+        let desktopDocument = try object(desktopAccounts[0].data)
+        check(desktopDocument["account_id"] as? String == "desktop-account" && desktopDocument["email"] as? String == "desktop@example.invalid", "Claude Desktop process metadata supplies stable identity")
+        check(desktopDocument["subscription_type"] as? String == "max" && desktopDocument["rate_limit_tier"] as? String == "default_claude_max_5x", "Claude Desktop subscription metadata is retained")
+        check(desktopDocument["refresh_token"] == nil, "Claude Desktop runtime import never invents a refresh token")
+        let desktopFallback = try LocalSubscriptionCredentials.load(provider: "claude", home: desktopHome,
+            environment: [:], keychainReader: { nil }, desktopProcessReader: { desktopProcesses })
+        check(desktopFallback.source.contains("Claude Desktop"), "Claude Desktop is a fallback when Code stores are absent")
+        let profileServices = LocalSubscriptionCredentials.claudeKeychainServices(environment: ["CLAUDE_SECURESTORAGE_CONFIG_DIR": "/tmp/claude-profile"])
+        check(profileServices.contains("Claude Code-credentials-7182514b"), "Claude Code profile Keychain service uses the config-directory hash")
+        check(profileServices.last == "Claude Code-credentials", "Claude Code profile lookup retains the default Keychain fallback")
         let cache = home.appendingPathComponent(".aws/sso/cache")
         try write(kiro, to: cache.appendingPathComponent("kiro-auth-token.json"))
         try write(registration, to: cache.appendingPathComponent("abc123.json"))

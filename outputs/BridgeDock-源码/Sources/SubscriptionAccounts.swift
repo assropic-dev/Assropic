@@ -23,7 +23,7 @@ struct SubscriptionProvider: Identifiable {
     // Only these handlers bind the refreshed identity to the selected file.
     var supportsRecovery: Bool { ["codex", "kiro", "zcode-bigmodel", "zcode-zai"].contains(id) }
     static let all: [SubscriptionProvider] = [
-        .init(id: "claude", title: "Claude", detail: "Claude Pro / Max · 连接本机 Claude Code 登录，或浏览器授权", sourceURL: "https://github.com/router-for-me/CLIProxyAPI"),
+        .init(id: "claude", title: "Claude", detail: "Claude Pro / Max · 读取本机 Claude Desktop / Code 登录，或浏览器授权", sourceURL: "https://github.com/router-for-me/CLIProxyAPI"),
         .init(id: "codex", title: "GPT / Codex", detail: "ChatGPT 订阅 · 连接本机 Codex 登录，或浏览器授权", sourceURL: "https://github.com/router-for-me/CLIProxyAPI"),
         .init(id: "kimi", title: "Kimi 国内", detail: "Kimi Code 国内账号 · 设备码授权", sourceURL: "https://github.com/router-for-me/CLIProxyAPI"),
         .init(id: "kimi-ai", title: "Kimi 国际", detail: "Kimi.ai Code 账号 · 设备码授权", sourceURL: "https://github.com/router-for-me/CLIProxyAPI"),

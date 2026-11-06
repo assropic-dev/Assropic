@@ -1,6 +1,7 @@
 import Foundation
 import CoreFoundation
 import Darwin
+import CryptoKit
 
 struct LocalSubscriptionCredential {
     let provider: String
@@ -175,31 +176,86 @@ enum LocalSubscriptionCredentials {
         }
     }
 
-    /// `keychainReader` is injectable for tests; its result stays in memory.
-    /// The caller decides whether and how to import the returned credential.
+    /// `keychainReader` and `desktopProcessReader` are injectable for tests;
+    /// their results stay in memory. The caller decides whether and how to
+    /// import the returned credential.
     static func load(provider: String, home: URL = FileManager.default.homeDirectoryForCurrentUser,
                      environment: [String: String] = ProcessInfo.processInfo.environment,
-                     keychainReader: (() throws -> Data?)? = nil) throws -> LocalSubscriptionCredential {
+                     keychainReader: (() throws -> Data?)? = nil,
+                     desktopProcessReader: (() throws -> Data?)? = nil) throws -> LocalSubscriptionCredential {
+        guard let first = try loadAll(provider: provider, home: home, environment: environment,
+                                      keychainReader: keychainReader,
+                                      desktopProcessReader: desktopProcessReader).first else {
+            throw missing(canonicalProvider(provider))
+        }
+        return first
+    }
+
+    /// Loads every locally available Claude account. Claude Code normally puts
+    /// its OAuth blob in the macOS keychain or `~/.claude/.credentials.json`.
+    /// Claude Desktop launches its embedded Code runtime with the current
+    /// OAuth access token in the child process environment instead, so a
+    /// desktop login can be present without either of those files existing.
+    /// Returning all distinct identities lets a machine with different Desktop
+    /// and standalone Code accounts import both without overwriting either.
+    static func loadAll(provider: String, home: URL = FileManager.default.homeDirectoryForCurrentUser,
+                        environment: [String: String] = ProcessInfo.processInfo.environment,
+                        keychainReader: (() throws -> Data?)? = nil,
+                        desktopProcessReader: (() throws -> Data?)? = nil) throws -> [LocalSubscriptionCredential] {
         let provider = canonicalProvider(provider)
         switch provider {
         case "claude":
-            let reader = keychainReader ?? readClaudeKeychain
-            if let result = try? reader(),
-               let data = try? normalized(result, provider: provider) {
-                return .init(provider: provider, source: "Claude Code · macOS 钥匙串",
-                             data: try addingClaudeIdentity(data, home: home, environment: environment))
+            var candidates: [(credential: LocalSubscriptionCredential, priority: Int)] = []
+            var lastError: Error?
+
+            // Desktop's process token is a short-lived access token. Keep it
+            // as the lowest-priority candidate so a standalone Code keychain
+            // or file credential (which includes a refresh token) wins when
+            // both processes represent the same account.
+            if let processData = try? (desktopProcessReader ?? readClaudeDesktopProcesses)(),
+               let desktop = claudeDesktopCredentials(processData) {
+                candidates.append(contentsOf: desktop.map { ($0, 1) })
+            }
+
+            if let keychainReader {
+                if let result = try? keychainReader(),
+                   let data = try? normalized(result, provider: provider) {
+                    do {
+                        candidates.append((.init(provider: provider, source: "Claude Code · macOS 钥匙串",
+                                                 data: try addingClaudeIdentity(data, home: home, environment: environment)), 3))
+                    } catch { lastError = error }
+                }
+            } else {
+                for service in claudeKeychainServices(environment: environment) {
+                    if let result = try? readClaudeKeychain(service: service),
+                       let data = try? normalized(result, provider: provider) {
+                        do {
+                            candidates.append((.init(provider: provider, source: "Claude Code · macOS 钥匙串",
+                                                     data: try addingClaudeIdentity(data, home: home, environment: environment)), 3))
+                            break
+                        } catch { lastError = error }
+                    }
+                }
             }
             let configured = nonempty(environment["CLAUDE_CONFIG_DIR"])
             let directory = configured.map { URL(fileURLWithPath: $0, isDirectory: true) }
                 ?? home.appendingPathComponent(".claude", isDirectory: true)
-            let credential = try loadFile(directory.appendingPathComponent(".credentials.json"), provider: provider)
-            return .init(provider: provider, source: credential.source,
-                         data: try addingClaudeIdentity(credential.data, home: home, environment: environment))
+            let fileURL = directory.appendingPathComponent(".credentials.json")
+            if let data = try? readFile(fileURL) {
+                do {
+                    candidates.append((.init(provider: provider, source: fileURL.path,
+                                             data: try addingClaudeIdentity(normalized(data, provider: provider), home: home, environment: environment)), 2))
+                } catch { lastError = error }
+            }
+            let selected = distinctClaudeCandidates(candidates)
+            if !selected.isEmpty { return selected }
+            if let lastError { throw lastError }
+            throw missing(provider)
         case "codex":
             let configured = nonempty(environment["CODEX_HOME"])
             let directory = configured.map { URL(fileURLWithPath: $0, isDirectory: true) }
                 ?? home.appendingPathComponent(".codex", isDirectory: true)
-            return try loadFile(directory.appendingPathComponent("auth.json"), provider: provider)
+            return [try loadFile(directory.appendingPathComponent("auth.json"), provider: provider)]
         case "kiro":
             let directory = home.appendingPathComponent(".aws/sso/cache", isDirectory: true)
             let url = directory.appendingPathComponent("kiro-auth-token.json")
@@ -225,14 +281,38 @@ enum LocalSubscriptionCredentials {
                     throw LocalSubscriptionError.message("Kiro 登录缺少配套的客户端注册信息，请在 Kiro 中重新登录，或使用 AWS Builder ID 浏览器授权。")
                 }
             }
-            return .init(provider: provider, source: url.path, data: data)
+            return [.init(provider: provider, source: url.path, data: data)]
         case "kimi", "kimi-ai":
-            return try loadKimiCode(provider: provider, home: home, environment: environment)
+            return [try loadKimiCode(provider: provider, home: home, environment: environment)]
         case "xai", "cursor-agent-v1", "zcode":
-            return try loadGeneric(provider: provider, home: home, environment: environment)
+            return [try loadGeneric(provider: provider, home: home, environment: environment)]
         default:
             throw LocalSubscriptionError.message("此服务暂不支持读取本机订阅登录。")
         }
+    }
+
+    private static func distinctClaudeCandidates(_ candidates: [(credential: LocalSubscriptionCredential, priority: Int)]) -> [LocalSubscriptionCredential] {
+        var selected: [(credential: LocalSubscriptionCredential, priority: Int)] = []
+        var byIdentity: [String: Int] = [:]
+        for candidate in candidates {
+            guard let document = try? object(candidate.credential.data) else { continue }
+            let identity = LocalSubscriptionIdentity.stableIdentity(document)
+                ?? filenameIdentity(candidate.credential)
+            if let index = byIdentity[identity] {
+                if candidate.priority > selected[index].priority { selected[index] = candidate }
+            } else {
+                byIdentity[identity] = selected.count
+                selected.append(candidate)
+            }
+        }
+        return selected.sorted { $0.priority > $1.priority }.map(\.credential)
+    }
+
+    private static func filenameIdentity(_ credential: LocalSubscriptionCredential) -> String {
+        // This is only a de-duplication key for opaque tokens. It is never
+        // written to disk or exposed in the UI.
+        let document = (try? object(credential.data)) ?? [:]
+        return credential.source + "\0" + (document["access_token"] as? String ?? "")
     }
 
     /// Kimi Code keeps the login token in a separate OAuth store.  The TOML
@@ -568,6 +648,123 @@ enum LocalSubscriptionCredentials {
         return try JSONSerialization.data(withJSONObject: document, options: [.sortedKeys])
     }
 
+    /// `claude-desktop` starts its embedded Code runtime with the current
+    /// OAuth access token in the child environment. The token is intentionally
+    /// never printed or persisted by this reader; it is normalized in memory
+    /// and copied to BridgeDock's private account store by the caller.
+    private static func claudeDesktopCredentials(_ data: Data) -> [LocalSubscriptionCredential]? {
+        let text = String(decoding: data, as: UTF8.self)
+        var result: [LocalSubscriptionCredential] = []
+        var seen = Set<String>()
+        for rawLine in text.split(whereSeparator: { $0.isNewline }) {
+            let line = String(rawLine)
+            guard line.contains("claude.app/Contents/MacOS/claude") else { continue }
+            guard processEnvironmentValue("CLAUDE_CODE_ENTRYPOINT", in: line) == "claude-desktop" else { continue }
+            guard let token = processEnvironmentValue("CLAUDE_CODE_OAUTH_TOKEN", in: line),
+                  validProcessValue(token, maxLength: 16_384) else { continue }
+            let account = processEnvironmentValue("CLAUDE_CODE_ACCOUNT_UUID", in: line)
+            let email = processEnvironmentValue("CLAUDE_CODE_USER_EMAIL", in: line)
+            let identity = account ?? email ?? token
+            guard seen.insert(identity).inserted else { continue }
+            var document: [String: Any] = ["type": "claude", "access_token": token,
+                                           "local_identity": "claude-desktop/" + identity]
+            if let account, validProcessValue(account, maxLength: 256) { document["account_id"] = account }
+            if let email, validProcessValue(email, maxLength: 512) { document["email"] = email }
+            if let subscription = processEnvironmentValue("CLAUDE_CODE_SUBSCRIPTION_TYPE", in: line),
+               validProcessValue(subscription, maxLength: 128) { document["subscription_type"] = subscription }
+            if let tier = processEnvironmentValue("CLAUDE_CODE_RATE_LIMIT_TIER", in: line),
+               validProcessValue(tier, maxLength: 256) { document["rate_limit_tier"] = tier }
+            if let scopes = processEnvironmentValue("CLAUDE_CODE_OAUTH_SCOPES", in: line),
+               validProcessValue(scopes, maxLength: 512) {
+                document["scopes"] = scopes.split(whereSeparator: { $0 == "," || $0 == " " }).map(String.init)
+            }
+            guard let encoded = try? JSONSerialization.data(withJSONObject: document, options: [.sortedKeys]),
+                  let normalized = try? normalized(encoded, provider: "claude") else { continue }
+            result.append(.init(provider: "claude", source: "Claude Desktop · 运行中的 Code 会话", data: normalized))
+        }
+        return result.isEmpty ? nil : result
+    }
+
+    private static func processEnvironmentValue(_ key: String, in line: String) -> String? {
+        for part in line.split(whereSeparator: { $0 == " " || $0 == "\t" }) {
+            let pair = part.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard pair.count == 2, pair[0] == key else { continue }
+            return String(pair[1])
+        }
+        return nil
+    }
+
+    private static func validProcessValue(_ value: String, maxLength: Int) -> Bool {
+        value.utf8.count <= maxLength && !value.isEmpty
+            && value.rangeOfCharacter(from: .whitespacesAndNewlines.union(.controlCharacters)) == nil
+    }
+
+    /// Recent Claude Code releases use `CLAUDE_SECURESTORAGE_CONFIG_DIR` to
+    /// select a per-profile Keychain item. Older releases tied the same suffix
+    /// to `CLAUDE_CONFIG_DIR`; try both derived names and the default item so
+    /// either client version can be imported without changing its files.
+    static func claudeKeychainServices(environment: [String: String]) -> [String] {
+        var result = ["Claude Code-credentials"]
+        let configured = nonempty(environment["CLAUDE_SECURESTORAGE_CONFIG_DIR"])
+            ?? nonempty(environment["CLAUDE_CONFIG_DIR"])
+        guard let configured else { return result }
+        var paths = [configured]
+        let expanded = NSString(string: configured).expandingTildeInPath
+        if !paths.contains(expanded) { paths.append(expanded) }
+        let standardized = URL(fileURLWithPath: expanded, isDirectory: true).standardizedFileURL.path
+        if !paths.contains(standardized) { paths.append(standardized) }
+        let suffixes = paths.map { digestPrefix($0) }
+        for suffix in suffixes {
+            let service = "Claude Code-credentials-" + suffix
+            if !result.contains(service) { result.insert(service, at: 0) }
+        }
+        return result
+    }
+
+    private static func digestPrefix(_ value: String) -> String {
+        SHA256.hash(data: Data(value.utf8)).prefix(4).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func readClaudeDesktopProcesses() throws -> Data? {
+        // First list command lines without environments, then inspect only
+        // Claude's embedded Code processes. This avoids copying unrelated
+        // secrets from every process on the machine into BridgeDock memory.
+        guard let processList = try runProcessData(executable: "/bin/ps", arguments: ["-ax", "-o", "pid=,command="],
+                                                   timeout: 5, maxBytes: 2_000_000) else { return nil }
+        var environments = Data()
+        let text = String(decoding: processList, as: UTF8.self)
+        for rawLine in text.split(whereSeparator: { $0.isNewline }) {
+            let line = String(rawLine)
+            guard line.contains("claude.app/Contents/MacOS/claude"),
+                  let pid = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).first,
+                  pid.range(of: "^[0-9]+$", options: .regularExpression) != nil else { continue }
+            guard let environment = try runProcessData(executable: "/bin/ps", arguments: ["eww", "-p", String(pid), "-o", "command="],
+                                                        timeout: 2, maxBytes: 512_000) else { continue }
+            environments.append(environment)
+            environments.append(10)
+            if environments.count > 8_000_000 { break }
+        }
+        return environments.isEmpty ? nil : environments
+    }
+
+    private static func runProcessData(executable: String, arguments: [String], timeout: TimeInterval,
+                                       maxBytes: Int) throws -> Data? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        let timeoutWork = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timeoutWork)
+        defer { timeoutWork.cancel() }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0, !data.isEmpty, data.count <= maxBytes else { return nil }
+        return data
+    }
+
     private static func readFile(_ url: URL) throws -> Data {
         // Validate the opened descriptor, not a separate path check, so a file
         // replacement cannot redirect the read to a symlink, device or pipe.
@@ -596,10 +793,10 @@ enum LocalSubscriptionCredentials {
         throw LocalSubscriptionError.message("本机登录文件过大，无法作为订阅凭据导入。")
     }
 
-    private static func readClaudeKeychain() throws -> Data? {
+    private static func readClaudeKeychain(service: String) throws -> Data? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
+        process.arguments = ["find-generic-password", "-s", service, "-w"]
         let output = Pipe()
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice

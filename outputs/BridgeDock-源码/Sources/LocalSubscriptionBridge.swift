@@ -80,17 +80,30 @@ extension BridgeStore {
         localSubscriptionStatus[provider] = "正在读取本机登录…"
         defer { busy = false }
         do {
-            let local = try await Task.detached(priority: .userInitiated) {
-                try LocalSubscriptionCredentials.load(provider: provider)
+            let locals = try await Task.detached(priority: .userInitiated) {
+                try LocalSubscriptionCredentials.loadAll(provider: provider)
             }.value
-            let imported = try await saveManagedLocalCredential(local)
+            guard !locals.isEmpty else { throw BridgeError.message("未找到本机登录凭据。") }
+            var imported: [LocalCredentialImportResult] = []
+            var failures: [String] = []
+            for local in locals {
+                do { imported.append(try await saveManagedLocalCredential(local)) }
+                catch { failures.append(redacted(error.localizedDescription)) }
+            }
+            guard !imported.isEmpty else { throw BridgeError.message(failures.joined(separator: "\n")) }
             let result: String
-            let source = URL(fileURLWithPath: imported.source).lastPathComponent
-            if imported.disabled { result = "已读取本机 \(source)；由 BridgeDock 独立保存并保留该账号的停用状态。" }
-            else if imported.modelCount == 0 { result = "已读取本机 \(source) 并由 BridgeDock 独立保存，尚无可用模型。请刷新列表或重新授权。" }
-            else { result = "已读取本机 \(source) · 独立保存本机登录 · \(imported.modelCount) 个模型。删除源 Agent 后仍可在 BD 运行。" }
-            localSubscriptionStatus[provider] = result
-            record(imported.title + " · " + result)
+            if imported.count == 1 {
+                let item = imported[0]
+                let source = URL(fileURLWithPath: item.source).lastPathComponent
+                if item.disabled { result = "已读取本机 \(source)；由 BridgeDock 独立保存并保留该账号的停用状态。" }
+                else if item.modelCount == 0 { result = "已读取本机 \(source) 并由 BridgeDock 独立保存，尚无可用模型。请刷新列表或重新授权。" }
+                else { result = "已读取本机 \(source) · 独立保存本机登录 · \(item.modelCount) 个模型。删除源 Agent 后仍可在 BD 运行。" }
+            } else {
+                let sources = imported.map { URL(fileURLWithPath: $0.source).lastPathComponent }.joined(separator: "、")
+                result = "已读取本机 \(imported.count) 个 Claude 登录来源（\(sources)）· 均已由 BridgeDock 独立保存。"
+            }
+            localSubscriptionStatus[provider] = failures.isEmpty ? result : result + "\n部分来源失败：" + failures.joined(separator: "；")
+            record((SubscriptionProvider.find(provider)?.title ?? provider) + " · " + result, failed: !failures.isEmpty)
         } catch {
             localSubscriptionStatus[provider] = redacted(error.localizedDescription)
             report(error)
@@ -111,17 +124,19 @@ extension BridgeStore {
         var missing = 0
         var failed: [String] = []
         for provider in providers {
-            let result = await Task.detached(priority: .userInitiated) { () -> Result<LocalSubscriptionCredential, BridgeError> in
-                do { return .success(try LocalSubscriptionCredentials.load(provider: provider.id)) }
+            let result = await Task.detached(priority: .userInitiated) { () -> Result<[LocalSubscriptionCredential], BridgeError> in
+                do { return .success(try LocalSubscriptionCredentials.loadAll(provider: provider.id)) }
                 catch { return .failure(.message(error.localizedDescription)) }
             }.value
             switch result {
-            case .success(let local):
-                do {
-                    let imported = try await saveManagedLocalCredential(local)
-                    saved += 1
-                    if imported.updated { updated += 1 }
-                } catch { failed.append(provider.title + "：" + redacted(error.localizedDescription)) }
+            case .success(let locals):
+                for local in locals {
+                    do {
+                        let imported = try await saveManagedLocalCredential(local)
+                        saved += 1
+                        if imported.updated { updated += 1 }
+                    } catch { failed.append(provider.title + "：" + redacted(error.localizedDescription)) }
+                }
             case .failure(let failure):
                 let message = redacted(failure.localizedDescription)
                 // A missing file is expected during a full scan; malformed or

@@ -47,8 +47,8 @@ cat > "$STAGE/Contents/Info.plist" <<'PLIST'
 <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
 </dict></plist>
 PLIST
-/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${BRIDGEDOCK_VERSION:-1.4.20}" "$STAGE/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BRIDGEDOCK_BUILD:-31}" "$STAGE/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${BRIDGEDOCK_VERSION:-1.4.21}" "$STAGE/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BRIDGEDOCK_BUILD:-32}" "$STAGE/Contents/Info.plist"
 find "$STAGE" -name '._*' -delete
 xattr -cr "$STAGE"
 for library in "$STAGE/Contents/Resources/"*.dylib; do
