@@ -1,4 +1,4 @@
-// Loaded before the Cursor workbench. The session exists only while Assropic runs.
+// Loaded before the Cursor workbench. The session exists only while BridgeDock runs.
 const sessionPort = __BD_SESSION_PORT__;
 const sessionSecret = __BD_SESSION_SECRET__;
 
@@ -14,7 +14,7 @@ try {
     }
   }
 } catch {
-  console.info("Assropic local session is inactive");
+  console.info("BridgeDock local session is inactive");
 }
 
 // The native Edit control is normally hover-only. Keep that existing control
@@ -56,14 +56,14 @@ function readOfficialModelSnapshot(service) {
       snapshot.values.some((entry, index) =>
         !entry || typeof entry.present !== "boolean" ||
         JSON.stringify(entry.path) !== JSON.stringify(officialModelPaths[index]))) {
-    throw new Error("Assropic official model snapshot is invalid");
+    throw new Error("BridgeDock official model snapshot is invalid");
   }
   return snapshot;
 }
 
 function saveOfficialModels(service) {
   // Multiple Cursor windows share storage. The first snapshot remains the
-  // official one until a window starts without a Assropic session.
+  // official one until a window starts without a BridgeDock session.
   if (readOfficialModelSnapshot(service)) return;
   const root = service._reactiveStorageService.applicationUserPersistentStorage;
   const values = officialModelPaths.map(path => {
@@ -172,7 +172,7 @@ function pickerProviderLabel(value) {
   if (lower.includes("minimax")) return "MiniMax";
   const compact = text.replace(/^(?:provider|channel|account|route):/i, "").trim();
   return compact ? compact.split(/[\s_/-]+/).filter(Boolean).map(token =>
-    token.charAt(0).toUpperCase() + token.slice(1).toLowerCase()).join("-") : "Assropic";
+    token.charAt(0).toUpperCase() + token.slice(1).toLowerCase()).join("-") : "BridgeDock";
 }
 
 function pickerModelName(provider, name) {
@@ -283,7 +283,7 @@ globalThis.__bridgeDockPickerLayout = function (props) {
     menuMaxHeight: Math.max(180, Math.min(500, (globalThis.innerHeight || 800) - 100)) };
 };
 
-// Assropic publishes each model's real context window and reasoning levels in
+// BridgeDock publishes each model's real context window and reasoning levels in
 // /v1/models (capabilities.context_length / reasoning_effort). Cursor's local runtime
 // reads the same fields for the remaining-context ring; the picker offers only
 // values the model actually supports.
@@ -445,7 +445,7 @@ function nativeParametersV2(name, native) {
   return { definitions, variants };
 }
 
-// 所选档位在该供应商上实际按哪档生效（来自 Assropic 发布的 provider.effective）。
+// 所选档位在该供应商上实际按哪档生效（来自 BridgeDock 发布的 provider.effective）。
 function effectiveNote(effective, parameterValues) {
   if (!effective || typeof effective !== "object") return "";
   const order = ["reasoning", "context", "fast"];
@@ -524,13 +524,13 @@ globalThis.__bridgeDockRefreshModels = function (service, toPlain, onlyIfChanged
   return pending;
 };
 
-// Opening the native picker or returning from Assropic is enough to see a
+// Opening the native picker or returning from BridgeDock is enough to see a
 // changed publication list. No polling, inference calls, or app restart needed.
 globalThis.__bridgeDockSyncModels = function () {
   if (!globalThis.__bridgeDockLocal || !activeModelService) return Promise.resolve();
   const { service, toPlain } = activeModelService;
   return globalThis.__bridgeDockRefreshModels(service, toPlain, true).catch(() => {
-    console.info("Assropic model refresh unavailable; keeping the last catalog");
+    console.info("BridgeDock model refresh unavailable; keeping the last catalog");
   });
 };
 globalThis.addEventListener?.("focus", () => globalThis.__bridgeDockSyncModels());
@@ -541,7 +541,7 @@ async function refreshModels(service, toPlain, onlyIfChanged) {
   if (hadOfficialSnapshot) saveLocalParameters(service);
   saveOfficialModels(service);
   let result = await service.fetchLocalProviderModelEnrichment();
-  if (!Array.isArray(result.pickerModels)) throw new Error("Assropic model catalog unavailable");
+  if (!Array.isArray(result.pickerModels)) throw new Error("BridgeDock model catalog unavailable");
   // Cursor's low-level discovery folds both HTTP failures and a valid empty
   // catalog into pickerModels:[] with no catalog. Confirm only this ambiguous
   // case against the local endpoint before clearing a previously usable list.
@@ -552,9 +552,9 @@ async function refreshModels(service, toPlain, onlyIfChanged) {
       headers: { Authorization: "Bearer " + session.key }, credentials: "omit", redirect: "error", cache: "no-store",
       signal: globalThis.AbortSignal?.timeout?.(3000)
     });
-    if (!response.ok) throw new Error("Assropic model catalog unavailable");
+    if (!response.ok) throw new Error("BridgeDock model catalog unavailable");
     const confirmed = await response.json();
-    if (!Array.isArray(confirmed?.data) || confirmed.data.length) throw new Error("Assropic empty catalog not confirmed");
+    if (!Array.isArray(confirmed?.data) || confirmed.data.length) throw new Error("BridgeDock empty catalog not confirmed");
     result = { ...result, providerModelCatalog: [], allProviderModelIds: [] };
   }
   const fingerprint = JSON.stringify([result.pickerModels, result.providerModelCatalog,

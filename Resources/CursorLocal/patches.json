@@ -56,9 +56,9 @@
         },
         {
           "find": "async getLocalInferenceProviderConfig(){",
-          "replace": "async getLocalInferenceProviderConfig(){if(globalThis.__bridgeDockLocal)return {baseUrl:globalThis.__bridgeDockLocal.baseURL,apiKey:globalThis.__bridgeDockLocal.key,customHeaders:globalThis.__bridgeDockParameterHeaders(),userAgent:\"Assropic\",modelId:globalThis.__bridgeDockLocal.model};",
+          "replace": "async getLocalInferenceProviderConfig(){if(globalThis.__bridgeDockLocal)return {baseUrl:globalThis.__bridgeDockLocal.baseURL,apiKey:globalThis.__bridgeDockLocal.key,customHeaders:globalThis.__bridgeDockParameterHeaders(),userAgent:\"BridgeDock\",modelId:globalThis.__bridgeDockLocal.model};",
           "previousReplacements": [
-            "async getLocalInferenceProviderConfig(){if(globalThis.__bridgeDockLocal)return {baseUrl:globalThis.__bridgeDockLocal.baseURL,apiKey:globalThis.__bridgeDockLocal.key,userAgent:\"Assropic\",modelId:globalThis.__bridgeDockLocal.model};"
+            "async getLocalInferenceProviderConfig(){if(globalThis.__bridgeDockLocal)return {baseUrl:globalThis.__bridgeDockLocal.baseURL,apiKey:globalThis.__bridgeDockLocal.key,userAgent:\"BridgeDock\",modelId:globalThis.__bridgeDockLocal.model};"
           ]
         },
         {
@@ -178,9 +178,9 @@
         },
         {
           "find": "async getLocalInferenceProviderConfig(){",
-          "replace": "async getLocalInferenceProviderConfig(){if(globalThis.__bridgeDockLocal)return {baseUrl:globalThis.__bridgeDockLocal.baseURL,apiKey:globalThis.__bridgeDockLocal.key,customHeaders:globalThis.__bridgeDockParameterHeaders(),userAgent:\"Assropic\",modelId:globalThis.__bridgeDockLocal.model};",
+          "replace": "async getLocalInferenceProviderConfig(){if(globalThis.__bridgeDockLocal)return {baseUrl:globalThis.__bridgeDockLocal.baseURL,apiKey:globalThis.__bridgeDockLocal.key,customHeaders:globalThis.__bridgeDockParameterHeaders(),userAgent:\"BridgeDock\",modelId:globalThis.__bridgeDockLocal.model};",
           "previousReplacements": [
-            "async getLocalInferenceProviderConfig(){if(globalThis.__bridgeDockLocal)return {baseUrl:globalThis.__bridgeDockLocal.baseURL,apiKey:globalThis.__bridgeDockLocal.key,userAgent:\"Assropic\",modelId:globalThis.__bridgeDockLocal.model};"
+            "async getLocalInferenceProviderConfig(){if(globalThis.__bridgeDockLocal)return {baseUrl:globalThis.__bridgeDockLocal.baseURL,apiKey:globalThis.__bridgeDockLocal.key,userAgent:\"BridgeDock\",modelId:globalThis.__bridgeDockLocal.model};"
           ]
         },
         {

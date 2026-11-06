@@ -61,7 +61,11 @@ extension BridgeStore {
         let installed = await cursorAdapterIsInstalled()
         guard cursorIdentity.enabled, running, !cursorBusy else { return }
         cursorInstalled = installed
-        if !installed || (!cursorSessionReady && !runningCursorApplications.isEmpty) {
+        // A matching adapter can keep running Cursor windows alive while the
+        // Assropic process restarts. In that case only the loopback session is
+        // missing; do not re-enter the destructive quit/reinstall path. That
+        // path is reserved for a missing or outdated adapter.
+        if !installed {
             await setCursorLocalEnabled(true)
             return
         }
