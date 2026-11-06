@@ -20,6 +20,15 @@ patch -p1 < "$VENDOR_DIR/Kiro2ccFreeOpus.patch"
 # A stream that ends cleanly mid tool-call arguments (no stop, no metering) is reported as
 # interrupted, so the client retries instead of running a half-written tool call.
 patch -p1 < "$VENDOR_DIR/Kiro2ccTruncatedToolUse.patch"
+# A non-oversized 200 response with no upstream events is usually a broken sticky
+# conversation on one account; evict that binding so the client's retry can rotate
+# to the other account. Oversized contexts keep the compression guidance.
+patch -p1 < "$VENDOR_DIR/Kiro2ccEmptyResponseFailover.patch"
+# After repeated empty streams, preserve the client history but start a fresh upstream continuation.
+patch -p1 < "$VENDOR_DIR/Kiro2ccContinuationRecovery.patch"
+# Account eviction waits for three consecutive empty streams on the same upstream continuation
+# within ten minutes; one empty response no longer moves the conversation to another account.
+patch -p1 < "$VENDOR_DIR/Kiro2ccEmptyStreakThreshold.patch"
 # BridgeDock drives the admin API directly; the embedded web consoles stay empty.
 for ui in admin-ui user-ui; do
   mkdir -p "web-ui/$ui/dist"

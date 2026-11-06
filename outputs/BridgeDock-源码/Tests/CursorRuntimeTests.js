@@ -69,7 +69,7 @@ assert.equal(runtime({ ...session, modelParametersEnabled: false }).__bridgeDock
   assert.equal(tooltip.tooltipData.markdownContent, '来自本地供应商。\n\n上下文：1,048,576 词元。\n\n最大输出：64,000 词元。\n\n支持思考。\n\n支持图片输入。');
 }
 
-// version 2：供应商作为参数排在 Effort 后面，每个供应商只组合自己声明的能力。
+// version 2：供应商作为参数排在 Effort 后面；每个供应商都覆盖全部档位，缺的档位按 effective 标注。
 {
   const ctx = runtime({ ...session, modelParametersEnabled: true });
   const values = (...ids) => ids.map(id => ({ id, label: id }));
@@ -84,7 +84,9 @@ assert.equal(runtime({ ...session, modelParametersEnabled: false }).__bridgeDock
       { id: 'account:a', name: 'Cursor 账号', context_length: 1000000,
         fast: true, context_options: [300000, 1000000],
         reasoning_effort: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'], reasoning_default: 'medium' },
-      { id: 'kiro:b', name: 'Kiro', context_length: 300000, reasoning_effort: ['low', 'high'] }
+      { id: 'kiro:b', name: 'Kiro', context_length: 300000, reasoning_effort: ['low', 'high'],
+        effective: { reasoning: { minimal: 'low', medium: 'low', xhigh: 'high', max: 'high' },
+          context: { '1000000': '' }, fast: { true: 'false' } } }
     ] } };
   const [row] = ctx.__bridgeDockEnrichModels([{ name: 'claude-opus-5.5' }], [entry]);
   assert.deepEqual(clone(row.parameterDefinitions.map(item => item.id)), ['fast', 'context', 'reasoning', 'provider']);
@@ -95,11 +97,23 @@ assert.equal(runtime({ ...session, modelParametersEnabled: false }).__bridgeDock
   assert.deepEqual(labels('provider'), ['Cursor 账号', 'Kiro']);
   const of = (variant, id) => variant.parameterValues.find(item => item.id === id)?.value;
   const kiro = row.variants.filter(variant => of(variant, 'provider') === 'kiro:b');
-  assert.deepEqual([...new Set(kiro.map(variant => of(variant, 'context')))], ['300000']);
-  assert.deepEqual([...new Set(kiro.map(variant => of(variant, 'reasoning')))], ['low', 'high']);
-  assert.ok(kiro.every(variant => of(variant, 'fast') === undefined), 'Kiro 不继承其他供应商的 Fast 开关');
-  assert.equal(kiro.length, 2);
-  assert.equal(row.variants.length, 2 + 2 * 7 * 2);
+  assert.deepEqual([...new Set(kiro.map(variant => of(variant, 'context')))].sort(), ['1000000', '300000'],
+    'Kiro 也提供其他供应商的上下文档位，选中时不会换供应商');
+  assert.deepEqual([...new Set(kiro.map(variant => of(variant, 'reasoning')))].sort(),
+    ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].sort(), 'Kiro 覆盖全部思考档位');
+  assert.deepEqual([...new Set(kiro.map(variant => of(variant, 'fast')))].sort(), ['false', 'true']);
+  assert.equal(kiro.length, 2 * 7 * 2);
+  assert.equal(row.variants.length, 2 * (2 * 7 * 2));
+  const kiroMax = kiro.find(variant => of(variant, 'reasoning') === 'max' && of(variant, 'context') === '1000000' && of(variant, 'fast') === 'true');
+  assert.equal(kiroMax.displayName, 'Kiro-Opus-5.5', '选择器内按所选供应商显示规范名称');
+  assert.equal(kiroMax.displayNameOutsidePicker, 'claude-opus-5.5 max 快速（按 high，上下文按默认，按标准速度）',
+    '名称里写明该供应商实际按哪档');
+  assert.equal(kiro.find(variant => of(variant, 'reasoning') === 'high' && of(variant, 'context') === '300000'
+    && of(variant, 'fast') === 'false').displayNameOutsidePicker, 'claude-opus-5.5 high', '本来就支持的档位不加注');
+  assert.equal(row.variants.find(variant => of(variant, 'provider') === 'account:a').displayName, 'Cursor-账号-Opus-5.5');
+  const kiroDefault = kiro.find(variant => variant.parameterValues.length && of(variant, 'context') === '300000'
+    && of(variant, 'reasoning') === 'low' && of(variant, 'fast') === 'false');
+  assert.ok(kiroDefault, 'Kiro 的默认组合取它自己的上下文和思考档位');
   const defaults = row.variants.filter(variant => variant.isDefaultNonMaxConfig);
   assert.equal(defaults.length, 1);
   assert.deepEqual(clone(defaults[0].parameterValues), [{ id: 'fast', value: 'false' }, { id: 'context', value: '1000000' },
@@ -115,6 +129,33 @@ assert.equal(runtime({ ...session, modelParametersEnabled: false }).__bridgeDock
   assert.deepEqual(clone(bare.parameterDefinitions.map(item => item.id)), ['provider']);
   assert.deepEqual(clone(bare.variants.map(variant => variant.parameterValues)), [[{ id: 'provider', value: 'p1' }]]);
   assert.equal(bare.variants[0].isDefaultNonMaxConfig, true);
+}
+
+// Picker labels are provider-model-version names while routing IDs and the
+// outside-picker trigger remain the original model IDs.
+{
+  const ctx = runtime({ ...session, modelParametersEnabled: true });
+  const providerOnly = (id, ownedBy, providers) => ({ id, owned_by: ownedBy,
+    bridgedock_parameters: { version: 2, definitions: [{ id: 'provider', name: '供应商',
+      values: providers.map(provider => ({ id: provider.id, label: provider.name })) }], providers } });
+  const catalog = [
+    providerOnly('claude-opus-5-5', 'Kiro', [
+      { id: 'provider:kiro', name: 'Kiro' }, { id: 'provider:anthropic', name: 'Claude' }
+    ]),
+    providerOnly('k3.1-pro', 'Kimi Code 国内', [
+      { id: 'channel:kimi', name: 'Kimi Code 国内' }
+    ])
+  ];
+  const rows = ctx.__bridgeDockEnrichModels(catalog.map(entry => ({ name: entry.id })), catalog);
+  const opus = rows.find(row => row.name === 'claude-opus-5-5');
+  const kimi = rows.find(row => row.name === 'k3.1-pro');
+  const byProvider = (row, value) => row.variants.find(variant =>
+    variant.parameterValues.some(parameter => parameter.id === 'provider' && parameter.value === value));
+  assert.equal(byProvider(opus, 'provider:kiro').displayName, 'Kiro-Opus-5.5');
+  assert.equal(byProvider(opus, 'provider:anthropic').displayName, 'Claude-Opus-5.5');
+  assert.equal(kimi.variants[0].displayName, 'Kimi-K3.1-Pro');
+  assert.equal(byProvider(opus, 'provider:kiro').displayNameOutsidePicker, 'claude-opus-5-5');
+  assert.equal(opus.clientDisplayName, 'claude-opus-5-5');
 }
 
 // Preserve provider-specific budgets and exact Cursor combinations across refreshes.
@@ -138,14 +179,15 @@ assert.equal(runtime({ ...session, modelParametersEnabled: false }).__bridgeDock
     ] } };
   const [row] = ctx.__bridgeDockEnrichModels([{ name: entry.id }], [entry]);
   const variants = id => row.variants.filter(variant => variant.parameterValues.some(p => p.id === 'provider' && p.value === id));
-  assert.equal(variants('cursor').length, 2, '不凭空组合 Cursor 不支持的上下文、速度和思考档位');
-  assert.equal(variants('kiro').length, 1, '不支持思考的供应商仍可选择');
+  assert.equal(variants('cursor').length, 4 * 2 * 2, 'Cursor 缺的组合也留在 Cursor，由网关取最接近的一组');
+  assert.deepEqual(clone(variants('cursor')[0].parameterValues), params({ context: '1000000', reasoning: 'low', fast: 'false', provider: 'cursor' }),
+    'Cursor 列出的默认组合仍是默认');
+  assert.equal(variants('kiro').length, 4 * 2 * 2, '不支持思考的供应商也覆盖全部档位');
   assert.deepEqual(clone(variants('work')[0].parameterValues), params({ fast: 'true', context: '262144', reasoning: 'high', provider: 'work' }));
-  assert.ok(variants('work').every(v => ['262144', '1000000'].includes(v.parameterValues.find(p => p.id === 'context').value)),
-    'Work 不接收其他供应商的上下文档位');
   ctx.testRow = row;
   const restored = vm.runInContext('selectedParameters(testRow, [{id:"provider",value:"kiro"},{id:"context",value:"1000000"},{id:"reasoning",value:"high"}])', ctx);
-  assert.deepEqual(clone(restored), params({ context: '200000', provider: 'kiro' }), '刷新时保留 Kiro，过大的预算降为 Kiro 默认值');
+  assert.deepEqual(clone(restored), params({ fast: 'false', context: '1000000', reasoning: 'high', provider: 'kiro' }),
+    '刷新时保留 Kiro 和所选档位，实际生效值由网关换算');
 }
 
 function makeService(initial, storage = new Map()) {
@@ -354,7 +396,7 @@ const original = {
     const aliased = ctx.__bridgeDockEnrichModels([{ name: "渠道前四/gpt-6", clientDisplayName: "GPT-6", inputboxShortModelName: "GPT" }], []);
     assert.equal(aliased[0].clientDisplayName, "渠道前四/gpt-6");
     assert.equal(aliased[0].inputboxShortModelName, "渠道前四/gpt-6");
-    assert.ok(aliased[0].variants.every(variant => variant.displayName === "渠道前四/gpt-6" && variant.displayNameOutsidePicker === "渠道前四/gpt-6"));
+    assert.ok(aliased[0].variants.every(variant => variant.displayName === "渠道前四-GPT-6" && variant.displayNameOutsidePicker === "渠道前四/gpt-6"));
   }
 
   // Native choices survive refresh, switch-off and switch-on. Official model
@@ -377,7 +419,7 @@ const original = {
     await ctx.__bridgeDockRefreshModels(service, row => row);
     assert.equal(state.aiSettings.modelConfig.composer.modelName, name, '旧点号名称迁移到统一模型入口');
     assert.deepEqual(clone(state.aiSettings.modelConfig.composer.selectedModels[0].parameters),
-      [{ id: 'context', value: '200000' }, { id: 'provider', value: 'kiro' }], '迁移保留原供应商并使用该供应商支持的预算');
+      [{ id: 'context', value: '1000000' }, { id: 'provider', value: 'kiro' }], '迁移保留原供应商和所选预算，超出部分由网关换算');
   }
 
   {

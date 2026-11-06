@@ -50,6 +50,13 @@ final class ModelGateway: @unchecked Sendable {
     /// 所选渠道未声明的思考强度、上下文和 Fast 会去掉，改用该渠道的默认值。
     static func provider(for publicID: String, in catalog: [PublishedModel],
                          parameters: inout [String: String]?) throws -> PublishedModel? {
+        try resolve(publicID, in: catalog, parameters: &parameters)?.model
+    }
+
+    /// 选定供应商，并把参数换算成它支持的值（不支持的档位降到最接近的一档，而不是丢弃）。
+    static func resolve(_ publicID: String, in catalog: [PublishedModel], parameters: inout [String: String]?,
+                        preferKiro: Bool = false)
+        throws -> (model: PublishedModel, provider: ModelPublishing.Provider, adjustments: [ParameterAdjustment])? {
         var providers = ModelPublishing.providers(in: catalog, publicID: publicID)
         if providers.isEmpty, let qualified = qualifiedProviders(for: publicID, in: catalog) {
             providers = qualified.providers
@@ -83,22 +90,35 @@ final class ModelGateway: @unchecked Sendable {
         // Existing clients may still call Kiro's dotted Claude ID. Preserve that
         // route unless they explicitly choose another provider of the merged model.
         let legacy = publicID == ModelPublishing.publicModelID(publicID) ? nil : providers.first { $0.model.modelName == publicID }
-        guard let chosen = requested.map({ key in providers.first { $0.key == key } }) ?? legacy ?? providers.first else {
+        // Cursor can cache a provider parameter from an older model catalog. When the
+        // local Kiro pool is active, keep Cursor's requests on Kiro so two Kiro
+        // conversations cannot silently fall back to the separate Claude subscription.
+        let kiro = preferKiro ? providers.first { $0.model.owner.lowercased() == "kiro" } : nil
+        guard let chosen = kiro ?? requested.map({ key in providers.first { $0.key == key } }) ?? legacy ?? providers.first else {
             throw BridgeError.message("所选供应商已不可用，请刷新模型列表后重新选择。")
         }
-        if var values = parameters {
-            if let effort = values["reasoning"], effort != "none", chosen.capability?.reasoningEfforts?.contains(effort) != true {
-                values.removeValue(forKey: "reasoning")
-            }
-            if let context = values["context"] {
-                let options = chosen.contextOptions
-                let size = Int(context)
-                if size.map(options.contains) != true { values.removeValue(forKey: "context") }
-            }
-            if values["fast"] != nil, !chosen.supportsFast { values.removeValue(forKey: "fast") }
-            parameters = values
+        var adjustments: [ParameterAdjustment] = []
+        if let values = parameters {
+            let resolved = chosen.resolve(values)
+            parameters = resolved.values
+            adjustments = resolved.adjustments
         }
-        return chosen.model
+        return (chosen.model, chosen, adjustments)
+    }
+
+    /// 响应头里写明实际供应商、生效参数和换算，客户端和诊断都能看到“选了什么、实际是什么”。
+    static func resolutionHeaders(provider: ModelPublishing.Provider, parameters: [String: String]?,
+                                  adjustments: [ParameterAdjustment]) -> [String: String] {
+        let encode = { (text: String) in text.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-._~"))) ?? "" }
+        var headers = ["X-BridgeDock-Provider": encode(provider.name), "X-BridgeDock-Provider-Id": encode(provider.key)]
+        let effective = (parameters ?? [:]).filter { ["reasoning", "context", "fast"].contains($0.key) }
+        if !effective.isEmpty {
+            headers["X-BridgeDock-Parameters"] = effective.keys.sorted().map { $0 + "=" + encode(effective[$0]!) }.joined(separator: ";")
+        }
+        if !adjustments.isEmpty {
+            headers["X-BridgeDock-Adjusted"] = adjustments.map { $0.id + ":" + encode($0.requested) + ">" + encode($0.effective) }.joined(separator: ";")
+        }
+        return headers
     }
 
     /// 旧公开 ID（`Curs-f3e5cf18/kimi-k3-high` 或 `kimi-k3-high`）对应的合并路由和其中的思考强度。
@@ -213,6 +233,20 @@ final class ModelGateway: @unchecked Sendable {
     private let lock = NSLock()
     private var listener: NWListener?
     private var clients: [UUID: GatewayClient] = [:]
+    private var adjustmentLog: [GatewayAdjustment] = []
+    /// Called on the gateway queue whenever a request's parameters were adjusted.
+    var onAdjustment: ((GatewayAdjustment) -> Void)?
+
+    fileprivate func record(_ entry: GatewayAdjustment) {
+        lock.withLock {
+            adjustmentLog.append(entry)
+            if adjustmentLog.count > 100 { adjustmentLog.removeFirst(adjustmentLog.count - 100) }
+        }
+        onAdjustment?(entry)
+    }
+
+    /// Most recent first.
+    func recentAdjustments() -> [GatewayAdjustment] { lock.withLock { adjustmentLog.reversed() } }
     private var configuration = GatewayConfiguration()
 
     /// `coreModels` is the full core route list; image requests always use the best GPT image model in it,
@@ -236,19 +270,19 @@ final class ModelGateway: @unchecked Sendable {
         lock.withLock { configuration.kiro = route }
     }
 
-    /// Kiro models are owned by "kiro" in the core catalog; their prefix selects the account pool,
-    /// or the shared pool when two or more Kiro accounts are enabled.
-    static func kiroTarget(for model: PublishedModel, route: KiroGatewayRoute?) -> (port: Int, key: String, model: String)? {
+    /// Kiro models are owned by "kiro" in the core catalog; their prefix selects the accounts that may
+    /// serve them (every pooled account when the prefix belongs to the shared pool). The router then
+    /// picks one of those workers per conversation.
+    static func kiroTarget(for model: PublishedModel, route: KiroGatewayRoute?) -> (workers: [KiroWorkerRoute], model: String)? {
         guard let route, model.owner.lowercased() == "kiro" else { return nil }
         let parts = model.id.split(separator: "/", maxSplits: 1).map(String.init)
-        let prefix = parts.count == 2 ? parts[0] : ""
-        // A known prefix joins the shared pool when one exists, so the model picked in the
-        // client no longer pins every request to one account.
-        guard let own = route.keys[prefix] else { return nil }
-        let pool = route.pooledPrefixes.contains(prefix) ? route.keys[KiroGatewayRoute.poolKey] : nil
-        let key = pool ?? own
-        return (route.port, key, parts.count == 2 ? parts[1] : model.id)
+        let workers = route.candidates(prefix: parts.count == 2 ? parts[0] : "")
+        guard !workers.isEmpty else { return nil }
+        return (workers, parts.count == 2 ? parts[1] : model.id)
     }
+
+    /// Places conversations on Kiro accounts; shared by every request this gateway serves.
+    let kiroRouter = KiroSessionRouter()
 
     /// Newest `gpt-image-X.Y` wins; the plain model is preferred over suffixed variants of the same version.
     static func preferredImageModel(_ ids: [String]) -> String? {
@@ -324,7 +358,7 @@ final class ModelGateway: @unchecked Sendable {
                 let client = GatewayClient(connection: connection, configuration: { [weak self] in
                     guard let self else { return GatewayConfiguration() }
                     return self.lock.withLock { self.configuration }
-                }, queue: self.queue) { [weak self] in self?.clients.removeValue(forKey: id) }
+                }, queue: self.queue, router: self.kiroRouter, record: { [weak self] entry in self?.record(entry) }) { [weak self] in self?.clients.removeValue(forKey: id) }
                 self.clients[id] = client
                 client.start()
             }
@@ -358,14 +392,12 @@ final class ModelGateway: @unchecked Sendable {
     }
 }
 
-struct KiroGatewayRoute {
-    let port: Int
-    let keys: [String: String]
-    /// Prefixes routed to the shared pool key.
-    var pooledPrefixes: Set<String> = []
-    /// `keys` entry of the key bound to every pooled account. Prefixes come from
-    /// `LocalSubscriptionIdentity` and never contain "*", so it cannot collide with one.
-    static let poolKey = "*"
+/// 一次请求里发生的参数换算，供“模型诊断”列出最近的记录。
+struct GatewayAdjustment: Equatable {
+    let date: Date
+    let model: String
+    let provider: String
+    let adjustments: [ParameterAdjustment]
 }
 
 private struct GatewayConfiguration {
@@ -388,9 +420,26 @@ private final class GatewayClient: NSObject, URLSessionDataDelegate, @unchecked 
     private var handled = false
     private var closed = false
     private var responseStarted = false
-    /// The core-bound form of a request sent to kiro2cc, replayed once if kiro2cc cannot be reached
+    /// The core-bound form of a request sent to kiro2cc, replayed once if no Kiro worker can be reached
     /// (for example in the seconds between a crash and its automatic restart).
     private var kiroFallback: (path: String, headers: [String: String], body: Data)?
+    /// A Kiro request in progress: the accounts that may serve it, the ones it already failed on,
+    /// and the one currently serving it.
+    private struct KiroAttempt {
+        let workers: [KiroWorkerRoute]
+        let session: String?
+        let path: String
+        let headers: [String: String]
+        let body: Data
+        var tried: Set<String> = []
+        var current: KiroWorkerRoute?
+        var status: Int?
+    }
+    private var kiroAttempt: KiroAttempt?
+    private let router: KiroSessionRouter?
+    /// Added to the upstream response so clients and diagnostics see the provider and parameters actually used.
+    private var resolutionHeaders: [String: String] = [:]
+    private let recordAdjustment: (GatewayAdjustment) -> Void
     private var continueSent = false
     private var session: URLSession?
     private var task: URLSessionDataTask?
@@ -401,8 +450,10 @@ private final class GatewayClient: NSObject, URLSessionDataDelegate, @unchecked 
     private static let imagePaths: Set<String> = ["/v1/images/generations", "/v1/images/edits"]
     private static let hopHeaders: Set<String> = ["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "host", "content-length", "authorization", "x-api-key", "accept-encoding", "expect", "x-bridgedock-parameters", "x-bridgedock-model-parameters"]
 
-    init(connection: NWConnection, configuration: @escaping () -> GatewayConfiguration, queue: DispatchQueue, completed: @escaping () -> Void) {
-        self.connection = connection; self.configurationProvider = configuration; self.queue = queue; self.completed = completed
+    init(connection: NWConnection, configuration: @escaping () -> GatewayConfiguration, queue: DispatchQueue,
+         router: KiroSessionRouter? = nil, record: @escaping (GatewayAdjustment) -> Void = { _ in }, completed: @escaping () -> Void) {
+        self.connection = connection; self.configurationProvider = configuration; self.queue = queue
+        self.router = router; self.recordAdjustment = record; self.completed = completed
     }
 
     func start() {
@@ -504,10 +555,18 @@ private final class GatewayClient: NSObject, URLSessionDataDelegate, @unchecked 
         let forwardedHeaders: [String: String]
         do {
             var parameters = try ModelGateway.parameterSelection(headers["x-bridgedock-parameters"])
-            guard let chosen = try ModelGateway.provider(for: model, in: configuration.catalog, parameters: &parameters) else {
+            let isCursorClient = (headers["user-agent"] ?? "").lowercased().hasPrefix("cursor/")
+            guard let resolved = try ModelGateway.resolve(model, in: configuration.catalog, parameters: &parameters,
+                                                          preferKiro: isCursorClient) else {
                 error(404, "该模型未开放或名称已更新，请刷新模型列表。"); return
             }
-            route = chosen
+            route = resolved.model
+            resolutionHeaders = ModelGateway.resolutionHeaders(provider: resolved.provider, parameters: parameters,
+                                                               adjustments: resolved.adjustments)
+            if !resolved.adjustments.isEmpty {
+                recordAdjustment(GatewayAdjustment(date: Date(), model: model, provider: resolved.provider.name,
+                                                   adjustments: resolved.adjustments))
+            }
             object = try ModelGateway.routedBody(object, route: route, path: path,
                                                 parameters: parameters)
             object = ModelGateway.droppingEmptyAssistantMessages(object)
@@ -516,16 +575,64 @@ private final class GatewayClient: NSObject, URLSessionDataDelegate, @unchecked 
         let kiro = ModelGateway.kiroTarget(for: route, route: configuration.kiro)
         // kiro2cc serves chat, messages and responses only; other paths stay on the core.
         let kiroPaths: Set<String> = ["/v1/chat/completions", "/v1/messages", "/v1/messages/count_tokens", "/v1/responses"]
-        if let kiro, kiroPaths.contains(path) {
+        if let kiro, kiroPaths.contains(path), router != nil {
             let coreBody = try? JSONSerialization.data(withJSONObject: object)
             object["model"] = kiro.model
             guard let data = try? JSONSerialization.data(withJSONObject: object) else { error(400, "无效的 JSON 请求体。"); return }
             if let coreBody { kiroFallback = (target, forwardedHeaders, coreBody) }
-            forward(path: target, headers: headers, body: data, port: kiro.port, key: kiro.key)
+            kiroAttempt = KiroAttempt(workers: kiro.workers, session: KiroSessionKey.derive(object), path: target, headers: headers, body: data)
+            sendToKiro()
             return
         }
         guard let data = try? JSONSerialization.data(withJSONObject: object) else { error(400, "无效的 JSON 请求体。"); return }
         forward(path: target, headers: forwardedHeaders, body: data)
+    }
+
+    /// Sends the Kiro request to the account the router picks; once no account is left, the core
+    /// serves it (or the client hears that every Kiro account is unavailable).
+    private func sendToKiro() {
+        guard var attempt = kiroAttempt, let router else { return }
+        guard let choice = router.select(session: attempt.session, candidates: attempt.workers, excluding: attempt.tried) else {
+            kiroAttempt = nil
+            resolutionHeaders.removeValue(forKey: "X-BridgeDock-Kiro-Account")
+            if let fallback = kiroFallback {
+                kiroFallback = nil
+                forward(path: fallback.path, headers: fallback.headers, body: fallback.body)
+            } else {
+                error(502, "Kiro 账号暂时都不可用，请稍后重试。")
+            }
+            return
+        }
+        attempt.current = choice.worker
+        attempt.tried.insert(choice.worker.id)
+        attempt.status = nil
+        kiroAttempt = attempt
+        router.begin(choice.worker.id)
+        resolutionHeaders["X-BridgeDock-Kiro-Account"] = choice.worker.id
+        forward(path: attempt.path, headers: attempt.headers, body: attempt.body, port: choice.worker.port, key: choice.worker.key)
+    }
+
+    /// A retryable error status, nothing sent to the client yet, and another account left to try.
+    private func shouldRetryKiro(status: Int) -> Bool {
+        guard let attempt = kiroAttempt, attempt.current != nil, !responseStarted,
+              KiroSessionRouter.retriesElsewhere(status: status) else { return false }
+        return attempt.workers.contains { !attempt.tried.contains($0.id) }
+    }
+
+    /// Reports the current Kiro account's result once; later calls do nothing.
+    private func kiroFinish(_ outcome: KiroSessionRouter.Outcome) {
+        guard let attempt = kiroAttempt, let current = attempt.current else { return }
+        kiroAttempt?.current = nil
+        router?.finish(current.id, session: attempt.session, outcome: outcome)
+    }
+
+    /// Drops the current upstream task and tries the next account.
+    private func retryKiro(after outcome: KiroSessionRouter.Outcome) {
+        kiroFinish(outcome)
+        let stale = session
+        session = nil; task = nil
+        stale?.invalidateAndCancel()
+        sendToKiro()
     }
 
     private func decodedChunks(_ data: Data) throws -> Data? {
@@ -593,14 +700,34 @@ private final class GatewayClient: NSObject, URLSessionDataDelegate, @unchecked 
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
         guard let http = response as? HTTPURLResponse else { completionHandler(.cancel); return }
+        // Decided on the client's queue: a task from an abandoned attempt is dropped, and a retryable
+        // Kiro error is retried on another account before the client sees anything.
+        enum Disposition { case stale, retry, relay }
+        let disposition: Disposition = queue.sync {
+            guard !self.closed, dataTask === self.task else { return .stale }
+            return self.shouldRetryKiro(status: http.statusCode) ? .retry : .relay
+        }
+        switch disposition {
+        case .stale: completionHandler(.cancel); return
+        case .retry:
+            completionHandler(.cancel)
+            queue.async { [self] in
+                guard !self.closed, dataTask === self.task else { return }
+                self.retryKiro(after: .failure(status: http.statusCode))
+            }
+            return
+        case .relay: break
+        }
         queue.async { [self] in
-            guard !self.closed else { return }
+            guard !self.closed, dataTask === self.task else { return }
             self.responseStarted = true
+            self.kiroAttempt?.status = http.statusCode
             var text = "HTTP/1.1 \(http.statusCode) \(HTTPURLResponse.localizedString(forStatusCode: http.statusCode))\r\n"
             for (key, value) in http.allHeaderFields {
                 guard let key = key as? String, !Self.hopHeaders.contains(key.lowercased()), !key.lowercased().hasPrefix("access-control-") else { continue }
                 text += key + ": " + String(describing: value) + "\r\n"
             }
+            for (key, value) in self.resolutionHeaders.sorted(by: { $0.key < $1.key }) { text += key + ": " + value + "\r\n" }
             text += "Transfer-Encoding: chunked\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n"
             self.send(Data(text.utf8))
         }
@@ -609,7 +736,7 @@ private final class GatewayClient: NSObject, URLSessionDataDelegate, @unchecked 
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         queue.async { [self] in
-            guard !self.closed else { return }
+            guard !self.closed, dataTask === self.task else { return }
             self.pendingBytes += data.count
             if self.pendingBytes >= 1024 * 1024, !self.suspended { dataTask.suspend(); self.suspended = true }
             var chunk = Data((String(data.count, radix: 16) + "\r\n").utf8)
@@ -625,20 +752,31 @@ private final class GatewayClient: NSObject, URLSessionDataDelegate, @unchecked 
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError failure: Error?) {
         queue.async { [self] in
-            guard !self.closed else { return }
+            guard !self.closed, task === self.task else { return }
             self.task = nil
             if let failure {
-                if !self.responseStarted, let fallback = self.kiroFallback, ModelGateway.isUnreachable(failure) {
-                    // Nothing reached the client yet, so the core's Kiro plugin can serve it instead.
-                    self.kiroFallback = nil
-                    self.session?.finishTasksAndInvalidate(); self.session = nil
-                    self.forward(path: fallback.path, headers: fallback.headers, body: fallback.body)
-                    return
+                if !self.responseStarted, ModelGateway.isUnreachable(failure) {
+                    if self.kiroAttempt?.current != nil {
+                        // That account's worker is down: try the next account, then the core.
+                        self.retryKiro(after: .unreachable)
+                        return
+                    }
+                    if let fallback = self.kiroFallback {
+                        // Nothing reached the client yet, so the core's Kiro plugin can serve it instead.
+                        self.kiroFallback = nil
+                        self.session?.finishTasksAndInvalidate(); self.session = nil
+                        self.forward(path: fallback.path, headers: fallback.headers, body: fallback.body)
+                        return
+                    }
                 }
+                // The worker dropped the connection: a failure of that account, not of the client.
+                self.kiroFinish(.failure(status: 599))
                 if !self.responseStarted { self.error(502, "反代内核连接失败，请检查 BridgeDock 服务。"); return }
                 // An interrupted SSE must not be reported as a successful, complete response.
                 self.finish(); return
             }
+            let status = self.kiroAttempt?.status ?? 200
+            self.kiroFinish((200..<400).contains(status) ? .success : .failure(status: status))
             self.connection.send(content: Data("0\r\n\r\n".utf8), completion: .contentProcessed { [weak self] _ in self?.finish() })
         }
     }
@@ -656,6 +794,8 @@ private final class GatewayClient: NSObject, URLSessionDataDelegate, @unchecked 
 
     func finish() {
         guard !closed else { return }
+        // A client that hung up mid-request only releases the account's in-flight slot.
+        kiroFinish(.cancelled)
         closed = true; task?.cancel(); task = nil
         session?.invalidateAndCancel(); session = nil
         connection.cancel(); completed()

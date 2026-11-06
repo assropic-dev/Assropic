@@ -1,0 +1,234 @@
+diff --git a/src/anthropic/handlers/stream.rs b/src/anthropic/handlers/stream.rs
+index 8c9410b..b7512d8 100644
+--- a/src/anthropic/handlers/stream.rs
++++ b/src/anthropic/handlers/stream.rs
+@@ -449,16 +449,18 @@ fn create_sse_stream(
+                                     ctx.generate_final_events()
+                                 } else {
+                                     if let Some(cid) = continuation_id.as_deref() {
+-                                        provider.mark_empty_continuation(cid);
+-                                        provider.token_manager().evict_sticky(cid);
++                                        if provider.mark_empty_continuation(cid) {
++                                            provider.token_manager().evict_sticky(cid);
++                                        }
+                                     }
+                                     vec![empty_response_error_event(false)]
+                                 }
+                             } else {
+                                 let elapsed = stream_started_at.elapsed();
+                                 if let Some(cid) = continuation_id.as_deref() {
+-                                    provider.mark_empty_continuation(cid);
+-                                    provider.token_manager().evict_sticky(cid);
++                                    if provider.mark_empty_continuation(cid) {
++                                        provider.token_manager().evict_sticky(cid);
++                                    }
+                                 }
+                                 tracing::warn!(
+                                     est_input_tokens = ctx.input_tokens,
+@@ -572,8 +574,9 @@ fn create_sse_stream(
+                             if let Some(tool_use_id) = ctx.truncated_tool_use() {
+                                 let elapsed = stream_started_at.elapsed();
+                                 if let Some(cid) = continuation_id.as_deref() {
+-                                    provider.mark_empty_continuation(cid);
+-                                    provider.token_manager().evict_sticky(cid);
++                                    if provider.mark_empty_continuation(cid) {
++                                        provider.token_manager().evict_sticky(cid);
++                                    }
+                                 }
+                                 tracing::warn!(
+                                     tool_use_id = %tool_use_id,
+@@ -585,8 +588,9 @@ fn create_sse_stream(
+                             } else if ctx.is_unmetered_partial_response() {
+                                 let elapsed = stream_started_at.elapsed();
+                                 if let Some(cid) = continuation_id.as_deref() {
+-                                    provider.mark_empty_continuation(cid);
+-                                    provider.token_manager().evict_sticky(cid);
++                                    if provider.mark_empty_continuation(cid) {
++                                        provider.token_manager().evict_sticky(cid);
++                                    }
+                                 }
+                                 tracing::warn!(
+                                     est_input_tokens = ctx.input_tokens,
+@@ -606,12 +610,16 @@ fn create_sse_stream(
+                                     out_events = ctx.generate_final_events();
+                                 } else {
+                                     if let Some(cid) = continuation_id.as_deref() {
+-                                        provider.mark_empty_continuation(cid);
+-                                        provider.token_manager().evict_sticky(cid);
++                                        if provider.mark_empty_continuation(cid) {
++                                            provider.token_manager().evict_sticky(cid);
++                                        }
+                                     }
+                                     out_events.push(empty_response_error_event(false));
+                                 }
+                             } else {
++                                if let Some(cid) = continuation_id.as_deref() {
++                                    provider.clear_empty_streak(cid);
++                                }
+                                 out_events = ctx.generate_final_events();
+                             }
+                             let bytes: Vec<Result<Bytes, Infallible>> = out_events
+diff --git a/src/kiro/provider/core.rs b/src/kiro/provider/core.rs
+index bf8ac45..2751570 100644
+--- a/src/kiro/provider/core.rs
++++ b/src/kiro/provider/core.rs
+@@ -78,10 +78,24 @@ pub struct KiroProvider {
+     /// 会话连续空流后的上游 continuation 恢复映射。
+     /// Cursor 会继续发送旧 conversationId；这里把它稳定改写到新上游会话。
+     continuation_recovery: Mutex<HashMap<String, ContinuationRecovery>>,
++    /// 按上游 continuation 统计的连续空流次数（只用于决定何时解绑账号）。
++    empty_streaks: Mutex<HashMap<String, EmptyStreak>>,
+ }
+ 
+ const CONTINUATION_RECOVERY_TTL: Duration = Duration::from_secs(60 * 60);
+ 
++/// 同一会话连续空流达到这个次数，才认为“账号或会话确实有问题”：解绑账号并恢复 continuation。
++/// 单次空流多为瞬时抖动或内容问题，立即切换既不能解决内容问题，还会破坏 prompt cache。
++pub(crate) const EMPTY_STREAK_THRESHOLD: u32 = 3;
++/// 连续空流的计数窗口：超过这段时间没有新的空流，计数重新开始。
++const EMPTY_STREAK_WINDOW: Duration = Duration::from_secs(10 * 60);
++
++#[derive(Clone, Copy)]
++struct EmptyStreak {
++    count: u32,
++    last_at: Instant,
++}
++
+ /// 同一客户端会话最多启用的恢复上游会话数（含第一次恢复），超过后不再开新会话，避免无限跳转。
+ const MAX_CONTINUATION_ROTATIONS: u32 = 3;
+ 
+@@ -122,6 +136,7 @@ impl KiroProvider {
+             failure_log_store: None,
+             endpoint_registry: Arc::new(EndpointBucketRegistry::new()),
+             continuation_recovery: Mutex::new(HashMap::new()),
++            empty_streaks: Mutex::new(HashMap::new()),
+         }
+     }
+ 
+@@ -266,14 +281,54 @@ impl KiroProvider {
+             .unwrap_or_else(|| client_id.to_string())
+     }
+ 
+-    /// 记录一次空流。`upstream_id` 是刚刚实际发往上游的 continuation：
++    /// 记录一次空流，返回是否应该解绑账号（驱逐 sticky）。
++    ///
++    /// 标准：同一上游 continuation 在 `EMPTY_STREAK_WINDOW` 内连续空流达到
++    /// `EMPTY_STREAK_THRESHOLD` 次才返回 `true`；未达到时只记录计数，不切换账号、不换 continuation。
++    /// 达到阈值后：
+     /// - 若它已是某个客户端会话的恢复目标，说明恢复后的上游会话也空流，换成新的 ID（有上限）；
+     /// - 否则它就是客户端原始 ID，为其建立第一次恢复映射。
+-    /// 客户端仍发送旧 ID，因此映射按旧 ID 保存，历史上下文保持不变。
+-    pub fn mark_empty_continuation(&self, upstream_id: &str) {
++    pub fn mark_empty_continuation(&self, upstream_id: &str) -> bool {
+         if upstream_id.is_empty() {
+-            return;
++            return false;
++        }
++        let count = {
++            let mut streaks = self.empty_streaks.lock();
++            streaks.retain(|_, v| v.last_at.elapsed() < EMPTY_STREAK_WINDOW);
++            let entry = streaks.entry(upstream_id.to_string()).or_insert(EmptyStreak {
++                count: 0,
++                last_at: Instant::now(),
++            });
++            entry.count += 1;
++            entry.last_at = Instant::now();
++            entry.count
++        };
++        if count < EMPTY_STREAK_THRESHOLD {
++            tracing::info!(
++                upstream_continuation_id = %upstream_id,
++                streak = count,
++                threshold = EMPTY_STREAK_THRESHOLD,
++                "空流 {count}/{EMPTY_STREAK_THRESHOLD}，未达到切换标准，保持账号绑定"
++            );
++            return false;
+         }
++        self.empty_streaks.lock().remove(upstream_id);
++        tracing::warn!(
++            upstream_continuation_id = %upstream_id,
++            streak = count,
++            "同一会话连续空流达到切换标准，解绑账号并恢复 continuation"
++        );
++        self.recover_after_empty_streak(upstream_id);
++        true
++    }
++
++    /// 上游成功返回内容后清零该会话的连续空流计数。
++    pub(crate) fn clear_empty_streak(&self, upstream_id: &str) {
++        self.empty_streaks.lock().remove(upstream_id);
++    }
++
++    /// 达到切换标准后的恢复映射（原 mark_empty_continuation 的逻辑）。
++    fn recover_after_empty_streak(&self, upstream_id: &str) {
+         let mut map = self.continuation_recovery.lock();
+         map.retain(|_, value| value.touched_at.elapsed() < CONTINUATION_RECOVERY_TTL);
+ 
+diff --git a/src/kiro/provider/tests.rs b/src/kiro/provider/tests.rs
+index b38cb91..57a669f 100644
+--- a/src/kiro/provider/tests.rs
++++ b/src/kiro/provider/tests.rs
+@@ -21,14 +21,18 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn test_empty_continuation_recovery_rewrites_and_bounds_rotations() {
++    fn test_empty_streak_threshold_gates_account_switch_and_recovery() {
+         let provider = create_test_provider(Config::default(), KiroCredentials::default());
+         let body = r#"{"conversationState":{"conversationId":"old-conversation","agentContinuationId":"old-continuation"}}"#;
++
++        // 前两次空流：不解绑、不换 continuation，客户端仍使用原 ID
++        assert!(!provider.mark_empty_continuation("old-continuation"));
++        assert!(!provider.mark_empty_continuation("old-continuation"));
+         assert_eq!(provider.recover_continuation_request(body), body);
+         assert_eq!(provider.effective_continuation_id("old-continuation"), "old-continuation");
+ 
+-        // 第一次空流：登记恢复映射，客户端继续发送旧 ID 时改写为新上游会话
+-        provider.mark_empty_continuation("old-continuation");
++        // 第三次连续空流：达到标准，解绑并登记恢复映射
++        assert!(provider.mark_empty_continuation("old-continuation"));
+         let first = provider.recover_continuation_request(body);
+         let first_json: serde_json::Value = serde_json::from_str(&first).unwrap();
+         let first_cont = first_json["conversationState"]["agentContinuationId"]
+@@ -38,17 +42,34 @@ mod tests {
+         assert_ne!(first_cont, "old-continuation");
+         assert_ne!(first_json["conversationState"]["conversationId"], "old-conversation");
+         assert_eq!(provider.effective_continuation_id("old-continuation"), first_cont);
++    }
+ 
+-        // 同一旧 ID 的晚到报告（请求在映射建立前发出）不会替换已建立的恢复会话
+-        provider.mark_empty_continuation("old-continuation");
+-        assert_eq!(provider.recover_continuation_request(body), first);
++    #[test]
++    fn test_successful_response_clears_empty_streak() {
++        let provider = create_test_provider(Config::default(), KiroCredentials::default());
++        assert!(!provider.mark_empty_continuation("c1"));
++        assert!(!provider.mark_empty_continuation("c1"));
++        // 中间有一次成功响应：计数清零，之后的空流重新从 1 开始
++        provider.clear_empty_streak("c1");
++        assert!(!provider.mark_empty_continuation("c1"));
++        assert!(!provider.mark_empty_continuation("c1"));
++        assert!(provider.mark_empty_continuation("c1"));
++    }
+ 
+-        // 恢复后的上游会话继续空流：逐次轮换，但总数有上限（3 个恢复会话），不会无限开新会话
+-        let mut current = first_cont.clone();
++    #[test]
++    fn test_recovered_session_rotations_are_bounded() {
++        let provider = create_test_provider(Config::default(), KiroCredentials::default());
++        for _ in 0..3 {
++            provider.mark_empty_continuation("old-continuation");
++        }
++        let mut current = provider.effective_continuation_id("old-continuation");
+         let mut seen = std::collections::HashSet::new();
+-        seen.insert(first_cont);
++        seen.insert(current.clone());
++        // 恢复后的会话每次连续空流 3 次才轮换；总共最多 3 个恢复会话，之后不再开新会话
+         for _ in 0..10 {
+-            provider.mark_empty_continuation(&current);
++            for _ in 0..3 {
++                provider.mark_empty_continuation(&current);
++            }
+             current = provider.effective_continuation_id("old-continuation");
+             seen.insert(current.clone());
+         }

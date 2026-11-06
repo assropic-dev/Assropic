@@ -59,13 +59,32 @@ class Kiro(BaseHTTPRequestHandler):
         self.wfile.write(b'event: message_stop\ndata: {"type":"message_stop"}\n\n'); self.wfile.flush()
         self.close_connection = True
 
+busy_seen = []
+
+class BusyKiro(BaseHTTPRequestHandler):
+    """A worker whose account is throttled: every request gets 429."""
+    protocol_version = 'HTTP/1.1'
+    def log_message(self, *args): pass
+    def do_POST(self):
+        self.rfile.read(int(self.headers['Content-Length']))
+        busy_seen.append(dict(self.headers))
+        data = b'{"error":{"type":"rate_limit_error","message":"busy"}}'
+        self.send_response(429); self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(data))); self.end_headers(); self.wfile.write(data)
+
 core = ThreadingHTTPServer(('127.0.0.1', 0), Core)
 threading.Thread(target=core.serve_forever, daemon=True).start()
 kiro = ThreadingHTTPServer(('127.0.0.1', 0), Kiro)
 threading.Thread(target=kiro.serve_forever, daemon=True).start()
 with socket.socket() as reserve:
     reserve.bind(('127.0.0.1', 0)); port = reserve.getsockname()[1]
-process = subprocess.Popen([sys.argv[1], str(port), str(core.server_port), str(kiro.server_port)], stdout=subprocess.PIPE, text=True)
+busy = ThreadingHTTPServer(('127.0.0.1', 0), BusyKiro)
+threading.Thread(target=busy.serve_forever, daemon=True).start()
+with socket.socket() as reserve:
+    # Bound then closed: connecting to it is refused, like a worker that crashed.
+    reserve.bind(('127.0.0.1', 0)); dead_port = reserve.getsockname()[1]
+process = subprocess.Popen([sys.argv[1], str(port), str(core.server_port), str(kiro.server_port), str(busy.server_port), str(dead_port)],
+                           stdout=subprocess.PIPE, text=True)
 count = 0
 
 def check(condition, label):
@@ -82,7 +101,11 @@ def call(path, body=None, key='public-test-key', headers=None, chunks=False):
     if chunks: payload = [payload[:11], payload[11:]]
     conn.request('POST' if body is not None else 'GET', path, payload, h, encode_chunked=chunks)
     response = conn.getresponse(); data = response.read(); conn.close()
+    global last_headers
+    last_headers = {key.lower(): value for key, value in response.getheaders()}
     return response.status, data
+
+last_headers = {}
 
 try:
     assert process.stdout.readline().strip() == 'READY'
@@ -126,9 +149,13 @@ try:
         status, data = call(path, {'model': cursor_model['id']}, headers=native_headers({'reasoning': 'high', 'fast': 'true'}))
         check(status == 200 and json.loads(data)['model'] == 'cursor-fixture/gpt-high-fast', 'Native parameter header selects exact Fast and Effort variant')
         check('x-bridgedock-parameters' not in {key.lower() for key in seen[-1][2]}, 'Local parameter header is consumed before forwarding')
-    before = len(seen)
-    check(call('/v1/responses', {'model': cursor_model['id']}, headers=native_headers({'reasoning': 'low', 'fast': 'true'}))[0] == 400
-          and len(seen) == before, 'Unsupported native combination does not silently downgrade')
+    status, data = call('/v1/responses', {'model': cursor_model['id']}, headers=native_headers({'reasoning': 'low', 'fast': 'true'}))
+    check(status == 200 and json.loads(data)['model'] == 'cursor-fixture/gpt-low'
+          and last_headers.get('x-bridgedock-adjusted') == 'fast:true>false'
+          and last_headers.get('x-bridgedock-parameters') == 'fast=false;reasoning=low',
+          'An unlisted native combination keeps the provider, uses the closest one and says so in the response headers')
+    check(last_headers.get('x-bridgedock-provider-id') == urllib.parse.quote(cursor_model['bridgedock_parameters']['providers'][0]['id'], safe='-._~'),
+          'The response names the provider that served the request')
     status, _ = call('/v1/responses', {'model': model}, headers=native_headers({'reasoning': 'ultra'}))
     check(status == 200 and 'reasoning' not in seen[-1][1], 'Unadvertised reasoning level falls back to the provider default')
     check(call('/v1/responses', {'model': model}, headers={'X-BridgeDock-Parameters': '%BAD'})[0] == 400,
@@ -139,8 +166,9 @@ try:
           'Context above the provider limit falls back to the provider default')
     relay = next(p['id'] for p in picker['providers'] if p['id'] == 'channel:gpt-relay')
     status, data = call('/v1/chat/completions', {'model': 'gpt'}, headers=native_headers({'provider': relay, 'reasoning': 'high'}))
-    check(status == 200 and json.loads(data)['model'] == 'relay/gpt' and 'reasoning_effort' not in seen[-1][1],
-          'provider parameter selects the channel and drops an effort it does not declare')
+    check(status == 200 and json.loads(data)['model'] == 'relay/gpt' and seen[-1][1].get('reasoning_effort') == 'medium'
+          and last_headers.get('x-bridgedock-adjusted') == 'reasoning:high>medium',
+          'provider parameter keeps the chosen channel and lowers an effort it lacks to its closest level')
     status, data = call('/v1/chat/completions', {'model': 'gpt'}, headers=native_headers({'reasoning': 'high'}))
     check(status == 200 and json.loads(data)['model'] == 'cursor-fixture/gpt-high', 'missing provider selects the first source')
     check(call('/v1/chat/completions', {'model': 'gpt'}, headers=native_headers({'provider': 'gone'}))[0] == 400,
@@ -172,6 +200,21 @@ try:
     status, _ = call('/v1/embeddings', {'model': pooled, 'input': 'x'}, headers=native_headers({'provider': kiro_provider}))
     check(status == 200 and len(kiro_seen) == kiro_count and seen[-1][1]['model'] == 'kiro/claude-opus-5.5',
           'endpoints kiro2cc does not serve stay on the core')
+    # Failover: accounts #1 (always 429) and #3 (not listening) share the "kiro" prefix with healthy #2.
+    for n in range(6):
+        status, _ = call('/v1/messages', {'model': pooled, 'messages': [{'role': 'user', 'content': 'failover chat %d' % n}]},
+                         headers=native_headers({'provider': kiro_provider}))
+        check(status == 200 and last_headers.get('x-bridgedock-kiro-account') == '2'
+              and kiro_seen[-1][2].get('Authorization') == 'Bearer kiro-pool-key',
+              'conversation %d is served by the healthy account while the others fail' % n)
+    check(len(busy_seen) >= 1 and all(h.get('Authorization') == 'Bearer kiro-busy-key' for h in busy_seen),
+          'the throttled account was tried with its own key and its 429 never reached the client')
+    for _ in range(3):
+        status, _ = call('/v1/messages', {'model': pooled, 'messages': [{'role': 'user', 'content': 'failover chat 0'},
+                                                                         {'role': 'assistant', 'content': 'ok'},
+                                                                         {'role': 'user', 'content': 'next'}]},
+                         headers=native_headers({'provider': kiro_provider}))
+        check(status == 200 and last_headers.get('x-bridgedock-kiro-account') == '2', 'a later turn of a conversation still succeeds')
     check(rows[0]['context_length'] == 32768, 'upstream model metadata is preserved')
     check(call('/v1/models', key='wrong')[0] == 401, 'public key is mandatory')
     check(call('/v1/models', key='internal-test-key')[0] == 401, 'internal key is not a public credential')

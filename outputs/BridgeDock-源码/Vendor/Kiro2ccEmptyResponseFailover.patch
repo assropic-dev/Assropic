@@ -1,0 +1,137 @@
+diff -ruN a/src/anthropic/handlers/stream.rs b/src/anthropic/handlers/stream.rs
+--- a/src/anthropic/handlers/stream.rs	2026-11-06 02:02:27
++++ b/src/anthropic/handlers/stream.rs	2026-11-06 02:09:56
+@@ -121,11 +121,13 @@
+     // 生成初始事件
+     let initial_events = ctx.generate_initial_events();
+ 
+-    // 创建 SSE 流
++    // 创建 SSE 流；保留会话的 continuation id，空流时清除其 sticky 绑定。
++    let continuation_id = crate::kiro::provider::KiroProvider::extract_continuation_id_from_request(request_body);
+     let stream = create_sse_stream(
+         response,
+         ctx,
+         initial_events,
++        continuation_id,
+         stream_deadline.map(|d| Instant::now() + d),
+         bridge_ctx,
+         std::sync::Arc::clone(&provider),
+@@ -253,6 +255,7 @@
+     response: reqwest::Response,
+     ctx: StreamContext,
+     initial_events: Vec<SseEvent>,
++    continuation_id: Option<String>,
+     deadline: Option<Instant>,
+     // web_search server tool 桥接上下文（None = 非桥接请求，零行为变化；
+     // max_uses 提取为 BridgeState，其余字段由续流逻辑消费）
+@@ -280,6 +283,8 @@
+     let body_stream = response.bytes_stream().boxed();
+     // 流起点（上游响应头已到达）：读流失败时用于诊断/提示"流已持续多久"
+     let stream_started_at = Instant::now();
++    // 空流通常是某个会话在当前账号上的坏 sticky 状态；清除后客户端重试可切到另一账号。
++    // 仅在非超大上下文路径调用，超大上下文仍应提示压缩而不是盲目换号。
+ 
+     // bridge_ctx 与 provider Arc 一并放入 unfold 状态元组：闭包为 FnMut + async move，
+     // 环境捕获的 Owned 值无法逐次 move 进 future（E0507/E0373），
+@@ -287,7 +292,9 @@
+     // 状态元组第 10 元：进行中的桥接轮（修复③保活用，None = 无轮次执行中）。
+     let processing_stream = stream::unfold(
+         (body_stream, ctx, EventStreamDecoder::new(), false, interval_at(Instant::now() + Duration::from_secs(PING_INTERVAL_SECS), Duration::from_secs(PING_INTERVAL_SECS)), deadline, bridge, bridge_ctx, provider, None::<InFlightRound>),
+-        move |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, deadline, mut bridge, bridge_ctx, provider, mut round_in_flight)| async move {
++        move |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, deadline, mut bridge, bridge_ctx, provider, mut round_in_flight)| {
++            let continuation_id = continuation_id.clone();
++            async move {
+             if finished {
+                 return None;
+             }
+@@ -439,6 +446,9 @@
+                                 if oversized {
+                                     ctx.generate_final_events()
+                                 } else {
++                                    if let Some(cid) = continuation_id.as_deref() {
++                                        provider.token_manager().evict_sticky(cid);
++                                    }
+                                     vec![empty_response_error_event(false)]
+                                 }
+                             } else {
+@@ -562,6 +572,9 @@
+                                 if oversized {
+                                     out_events = ctx.generate_final_events();
+                                 } else {
++                                    if let Some(cid) = continuation_id.as_deref() {
++                                        provider.token_manager().evict_sticky(cid);
++                                    }
+                                     out_events.push(empty_response_error_event(false));
+                                 }
+                             } else {
+@@ -603,6 +616,7 @@
+                         .collect::<Vec<_>>();
+                     Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, deadline, bridge, bridge_ctx, provider, round_in_flight)))
+                 }
++            }
+             }
+         },
+     )
+diff -ruN a/src/kiro/token_manager/manager/core.rs b/src/kiro/token_manager/manager/core.rs
+--- a/src/kiro/token_manager/manager/core.rs	2026-11-06 02:02:27
++++ b/src/kiro/token_manager/manager/core.rs	2026-11-06 02:02:13
+@@ -742,6 +742,21 @@
+         true
+     }
+ 
++    /// 清除某个会话的 sticky 绑定。
++    ///
++    /// 上游返回 200 但没有任何事件时，继续把同一会话固定在原账号只会重复空流。
++    /// 由上层在确认不是超大上下文后调用，让客户端下一次重试时重新选择账号。
++    pub fn evict_sticky(&self, continuation_id: &str) -> bool {
++        let removed = self.sticky_cache.lock().remove(continuation_id).is_some();
++        if removed {
++            tracing::warn!(
++                "sticky 绑定已清除: continuation_id={}（上游空流，下一次重试重新选择账号）",
++                continuation_id
++            );
++        }
++        removed
++    }
++
+     /// 切换到下一个优先级最高的可用账号（内部方法）
+     fn switch_to_next_by_priority(&self) {
+         let entries = self.entries.lock();
+diff -ruN a/src/kiro/token_manager/tests/sticky.rs b/src/kiro/token_manager/tests/sticky.rs
+--- a/src/kiro/token_manager/tests/sticky.rs	2026-11-06 02:02:27
++++ b/src/kiro/token_manager/tests/sticky.rs	2026-11-06 02:02:27
+@@ -109,6 +109,34 @@
+     }
+ 
+     #[tokio::test]
++    async fn test_empty_response_evicts_sticky_and_reselects() {
++        let mut config = Config::default();
++        config.load_balancing_mode = "balanced".to_string();
++        let manager = MultiTokenManager::new(
++            config,
++            vec![make_valid_cred("t1"), make_valid_cred("t2")],
++            None,
++            None,
++            false,
++        )
++        .unwrap();
++
++        let first = manager
++            .acquire_context_sticky(None, &[], Some("session-empty"), &[])
++            .await
++            .unwrap();
++        assert!(manager.evict_sticky("session-empty"));
++        assert!(!manager.sticky_cache.lock().contains_key("session-empty"));
++
++        // 空流后下一次重试不得继续黏在原账号；balanced 的 RR 会选择另一个账号。
++        let retry = manager
++            .acquire_context_sticky(None, &[], Some("session-empty"), &[])
++            .await
++            .unwrap();
++        assert_ne!(retry.id, first.id);
++    }
++
++    #[tokio::test]
+     async fn test_sticky_avoid_switches_credential_but_keeps_binding() {
+         // 请求内重试：绑定账号刚被限流时应换账号完成本次调用，
+         // 但绑定关系必须保留，下次请求仍回到原账号命中 prompt cache。

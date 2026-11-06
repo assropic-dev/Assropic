@@ -153,12 +153,72 @@ function pickerFamily(name) {
   const stem = model.split(/[-_.\s]/)[0] || model;
   return { key: "other:" + stem, title: stem || "其他模型", order: pickerFamilies.length };
 }
+
+// Cursor's picker uses each variant's displayName for the row label. Keep the
+// real model ID and the outside-picker name unchanged, but make the row clear
+// about which supplier serves it (for example Kiro-Opus-5.5 or Kimi-K3.1-Pro).
+function pickerProviderLabel(value) {
+  const text = String(value ?? "").normalize("NFKC").trim();
+  const lower = text.toLocaleLowerCase();
+  if (lower.includes("claude") || lower.includes("anthropic")) return "Claude";
+  if (lower.includes("kiro")) return "Kiro";
+  if (lower.includes("kimi") || lower.includes("moonshot")) return "Kimi";
+  if (lower.includes("gpt") || lower.includes("openai") || lower.includes("codex")) return "GPT";
+  if (lower.includes("gemini") || lower.includes("google")) return "Gemini";
+  if (lower.includes("grok") || lower.includes("xai")) return "Grok";
+  if (lower.includes("deepseek")) return "DeepSeek";
+  if (lower.includes("glm") || lower.includes("zcode")) return lower.includes("glm") ? "GLM" : "ZCode";
+  if (lower.includes("qwen")) return "Qwen";
+  if (lower.includes("minimax")) return "MiniMax";
+  const compact = text.replace(/^(?:provider|channel|account|route):/i, "").trim();
+  return compact ? compact.split(/[\s_/-]+/).filter(Boolean).map(token =>
+    token.charAt(0).toUpperCase() + token.slice(1).toLowerCase()).join("-") : "BridgeDock";
+}
+
+function pickerModelName(provider, name) {
+  const providerLabel = pickerProviderLabel(provider);
+  const aliases = {
+    claude: ["claude", "anthropic"], kiro: ["kiro"], kimi: ["kimi", "moonshot"],
+    gpt: ["gpt", "chatgpt", "openai", "codex"], gemini: ["gemini", "google"],
+    grok: ["grok", "xai"], deepseek: ["deepseek"], glm: ["glm", "chatglm"],
+    zcode: ["zcode"], qwen: ["qwen", "qwq", "qvq"], minimax: ["minimax"]
+  }[providerLabel.toLocaleLowerCase()] ?? [];
+  let tail = String(name ?? "").normalize("NFKC").split("/").at(-1) ?? "";
+  tail = tail.replace(/[\s_]+/g, "-");
+  const parts = tail.split(/-+/).filter(Boolean);
+  // Claude's family prefix is part of the raw routing ID even when Kiro is
+  // the selected supplier, so keep the picker label as Kiro-Opus-5.5.
+  if (aliases.includes(parts[0]?.toLocaleLowerCase()) || parts[0]?.toLocaleLowerCase() === "claude") parts.shift();
+  const modelParts = [];
+  for (let index = 0; index < parts.length; index += 1) {
+    const current = parts[index];
+    const next = parts[index + 1];
+    if (/^\d+$/.test(current) && /^\d+$/.test(next ?? "")) {
+      modelParts.push(`${current}.${next}`);
+      index += 1;
+    } else {
+      modelParts.push(current);
+    }
+  }
+  const title = modelParts.map(token => {
+    if (/^[a-z]\d/.test(token)) return token.charAt(0).toUpperCase() + token.slice(1);
+    const known = { gpt: "GPT", glm: "GLM", qwen: "Qwen", kimi: "Kimi", llama: "Llama",
+      opus: "Opus", sonnet: "Sonnet", haiku: "Haiku", fable: "Fable" }[token.toLocaleLowerCase()];
+    if (known) return known;
+    if (/^[A-Z0-9]+(?:\.[A-Z0-9]+)*$/.test(token)) return token;
+    return token.charAt(0).toUpperCase() + token.slice(1).toLowerCase();
+  }).join("-");
+  return [providerLabel, title].filter(Boolean).join("-");
+}
+
 let modelGroups = new Map();
+let modelPickerNames = new Map();
 function organizeModels(rows, catalog) {
   const entries = Array.isArray(catalog) ? catalog : catalog?.data ?? [];
   const metadata = new Map(entries.map(entry => [entry.id, entry]));
   const groups = new Map();
   const byModel = new Map();
+  const pickerNames = new Map();
   for (const row of rows) {
     const prefix = row.name.includes("/") ? row.name.slice(0, row.name.indexOf("/")) : "";
     const entry = metadata.get(row.name) ?? {};
@@ -167,10 +227,12 @@ function organizeModels(rows, catalog) {
     const providers = Array.isArray(entry.bridgedock_parameters?.providers) ? entry.bridgedock_parameters.providers : [];
     byModel.set(row.name, { ...family, sources: [prefix, entry.owned_by,
       ...providers.flatMap(provider => [provider.name, provider.id])].filter(Boolean) });
+    pickerNames.set(row.name, pickerModelName(entry.owned_by || prefix, row.name));
   }
   const ordered = [...groups.values()].sort((a, b) => a.order - b.order || a.title.localeCompare(b.title, "zh-CN", { numeric: true }));
   const sections = new Map(ordered.map((group, index) => [group.key, index + 1]));
   modelGroups = byModel;
+  modelPickerNames = pickerNames;
   return rows.map(row => ({ ...row, namedModelSectionIndex: sections.get(byModel.get(row.name).key),
     ...(row.tagline === "Local provider model" ? { tagline: "本地供应商模型" } : {}),
     ...(row.tooltipData?.markdownContent ? { tooltipData: { ...row.tooltipData,
@@ -182,7 +244,8 @@ function organizeModels(rows, catalog) {
         .replaceAll("Vision: supported.", "支持图片输入。")
     } } : {}),
     clientDisplayName: row.name, inputboxShortModelName: row.name,
-    variants: row.variants?.map(variant => ({ ...variant, displayName: row.name, displayNameOutsidePicker: row.name }))
+    variants: row.variants?.map(variant => ({ ...variant,
+      displayName: pickerNames.get(row.name) ?? row.name, displayNameOutsidePicker: row.name }))
   })).sort((a, b) => a.namedModelSectionIndex - b.namedModelSectionIndex ||
     a.name.split("/").at(-1).localeCompare(b.name.split("/").at(-1), "zh-CN", { numeric: true }) || a.name.localeCompare(b.name));
 }
@@ -300,8 +363,10 @@ function selectedParameters(row, requested) {
     desired.get(parameter.id) === parameter.value))?.parameterValues ?? fallback.parameterValues;
 }
 
-// version 2：同名模型合并为一条，供应商作为参数。每个供应商只组合自己声明的
-// context/effort，切换供应商后原生菜单里的可选项随之变化。
+// version 2：同名模型合并为一条，供应商作为参数。每个供应商都覆盖全部档位：
+// Cursor 的原生菜单显示所有供应商的档位并集，若某供应商缺少某档，选中它时
+// Cursor 只能换到别的供应商。现在缺的档位也留在原供应商，由网关按 provider.effective
+// 降到最接近的一档，名称里注明实际按哪档。
 function nativeParametersV2(name, native) {
   const valid = value => typeof value === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(value);
   const declared = id => {
@@ -336,14 +401,18 @@ function nativeParametersV2(name, native) {
     const provider = providers.find(item => item.id === value.id);
     const limit = Number(provider.context_length);
     const declaredContexts = Array.isArray(provider.context_options) ? provider.context_options.map(String) : undefined;
-    const contexts = Number.isSafeInteger(limit) && limit > 0
+    // 本供应商自己的档位只用来挑默认组合；可选组合覆盖全部档位。
+    const ownContexts = Number.isSafeInteger(limit) && limit > 0
       ? contextValues.map(item => item.id).filter(id => Number(id) <= limit && (!declaredContexts || declaredContexts.includes(id))) : [];
     const supported = Array.isArray(provider.reasoning_effort) ? provider.reasoning_effort : [];
-    const efforts = reasoningValues.map(item => item.id).filter(id => supported.includes(id));
-    const defaultEffort = efforts.includes(provider.reasoning_default) ? provider.reasoning_default : efforts[0];
-    const defaultContext = contexts.includes(String(provider.context_default)) ? String(provider.context_default) : contexts.at(-1);
-    const speeds = fast && provider.fast === true ? ["false", "true"] : [undefined];
-    const defaultSpeed = provider.fast_default === true ? "true" : speeds[0];
+    const ownEfforts = reasoningValues.map(item => item.id).filter(id => supported.includes(id));
+    const contexts = contextValues.map(item => item.id);
+    const efforts = reasoningValues.map(item => item.id);
+    const defaultEffort = ownEfforts.includes(provider.reasoning_default) ? provider.reasoning_default : ownEfforts[0] ?? efforts[0];
+    const defaultContext = ownContexts.includes(String(provider.context_default)) ? String(provider.context_default)
+      : ownContexts.at(-1) ?? contexts.at(-1);
+    const speeds = fast ? ["false", "true"] : [undefined];
+    const defaultSpeed = provider.fast === true && provider.fast_default === true ? "true" : speeds[0];
     const combos = (contexts.length ? contexts : [undefined]).flatMap(context =>
       (efforts.length ? efforts : [undefined]).flatMap(effort =>
         speeds.map(speed => ({ context, effort, speed }))));
@@ -353,20 +422,42 @@ function nativeParametersV2(name, native) {
         ...(effort !== undefined ? [{ id: "reasoning", value: effort }] : [])],
       isDefaultNonMaxConfig: context === defaultContext && effort === defaultEffort && speed === defaultSpeed
     }));
-    // Cursor publishes exact combinations, which may not form a Cartesian product.
-    const declaredVariants = Array.isArray(provider.variants) && provider.variants.length ? provider.variants : generated;
-    const choices = declaredVariants.filter(variant => Array.isArray(variant.parameterValues))
+    // Cursor publishes exact combinations, which may not form a Cartesian product; the
+    // remaining combinations stay on this provider and the gateway picks the closest listed one.
+    const declared = Array.isArray(provider.variants) && provider.variants.length
+      ? provider.variants.filter(variant => Array.isArray(variant.parameterValues)) : [];
+    const key = values => values.filter(item => item.id !== "provider").map(item => item.id + "=" + item.value).sort().join("&");
+    const listed = new Set(declared.map(variant => key(variant.parameterValues)));
+    const filler = declared.length ? generated.filter(variant => !listed.has(key(variant.parameterValues)))
+      .map(variant => ({ ...variant, isDefaultNonMaxConfig: false })) : generated;
+    const choices = [...declared, ...filler]
       .slice().sort((a, b) => Number(!!b.isDefaultNonMaxConfig) - Number(!!a.isDefaultNonMaxConfig));
     choices.forEach((variant, choiceIndex) => {
       const parameterValues = [...variant.parameterValues.filter(item => item.id !== "provider"), { id: "provider", value: value.id }];
       const isDefault = index === 0 && choiceIndex === 0;
-      variants.push({ parameterValues, displayName: name,
-        displayNameOutsidePicker: parameterLabel(name, [...parameterValues.filter(item => item.id !== "fast"),
-          ...parameterValues.filter(item => item.id === "fast")], definitions),
+      const label = parameterLabel(name, [...parameterValues.filter(item => item.id !== "fast"),
+        ...parameterValues.filter(item => item.id === "fast")], definitions);
+      variants.push({ parameterValues, displayName: pickerModelName(provider.name || value.label || value.id, name),
+        displayNameOutsidePicker: label + effectiveNote(provider.effective, parameterValues),
         isMaxMode: false, isDefaultNonMaxConfig: isDefault, isDefaultMaxConfig: isDefault });
     });
   });
   return { definitions, variants };
+}
+
+// 所选档位在该供应商上实际按哪档生效（来自 BridgeDock 发布的 provider.effective）。
+function effectiveNote(effective, parameterValues) {
+  if (!effective || typeof effective !== "object") return "";
+  const order = ["reasoning", "context", "fast"];
+  const notes = parameterValues.slice().sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id)).map(parameter => {
+    const mapped = effective[parameter.id]?.[parameter.value];
+    if (mapped === undefined) return "";
+    if (parameter.id === "reasoning") return mapped ? `按 ${effortLabel(mapped)}` : "按默认思考";
+    if (parameter.id === "context") return mapped ? `上下文按 ${tokenLabel(Number(mapped))}` : "上下文按默认";
+    if (parameter.id === "fast") return "按标准速度";
+    return "";
+  }).filter(Boolean);
+  return notes.length ? `（${notes.join("，")}）` : "";
 }
 
 globalThis.__bridgeDockEnrichModels = function (rows, catalog) {
@@ -378,13 +469,18 @@ globalThis.__bridgeDockEnrichModels = function (rows, catalog) {
     const { limit, efforts, defaultEffort } = modelCapability(metadata);
     const base = { ...row, ...(limit ? { contextTokenLimit: limit } : {}), supportsThinking: efforts.length > 0,
       supportsNonMaxMode: true, supportsMaxMode: false };
-    if (!parametersEnabled) return { ...base, parameterDefinitions: [], variants: [] };
+    const pickerName = modelPickerNames.get(row.name) ?? row.name;
+    const displayOnlyVariant = {
+      parameterValues: [], displayName: pickerName, displayNameOutsidePicker: row.name,
+      isMaxMode: false, isDefaultNonMaxConfig: true, isDefaultMaxConfig: false
+    };
+    if (!parametersEnabled) return { ...base, parameterDefinitions: [], variants: [displayOnlyVariant] };
     const native = metadata?.bridgedock_parameters;
     if (native?.version === 1 && native.definitions?.length && native.variants?.length) {
       const definitions = localizedDefinitions(native.definitions);
       return { ...base, parameterDefinitions: definitions,
         variants: native.variants.map(variant => ({ ...variant,
-          displayName: row.name, displayNameOutsidePicker: parameterLabel(row.name, variant.parameterValues, definitions),
+          displayName: pickerName, displayNameOutsidePicker: parameterLabel(row.name, variant.parameterValues, definitions),
           isMaxMode: false })) };
     }
     if (native?.version === 2 && Array.isArray(native.definitions)) {
@@ -402,14 +498,14 @@ globalThis.__bridgeDockEnrichModels = function (rows, catalog) {
         markdownTooltip: "选择本次请求的思考强度。“默认”使用所选模型原有的档位。",
         parameterType: { enumParameter: { values: reasoning.map(value => ({ value, displayName: effortLabel(value) })) } } }] : [])
     ];
-    if (!parameterDefinitions.length) return { ...base, parameterDefinitions: [], variants: [] };
+    if (!parameterDefinitions.length) return { ...base, parameterDefinitions: [], variants: [displayOnlyVariant] };
     const contextValues = contexts.length > 1 ? contexts.map(String) : [undefined];
     const reasoningValues = reasoning.length ? reasoning : [undefined];
     const variants = contextValues.flatMap(context => reasoningValues.map(effort => {
       const isDefault = (context === undefined || context === String(limit)) && (effort === undefined || effort === defaultEffort);
       return { parameterValues: [...(context !== undefined ? [{ id: "context", value: context }] : []),
         ...(effort !== undefined ? [{ id: "reasoning", value: effort }] : [])],
-        displayName: row.name, displayNameOutsidePicker: parameterLabel(row.name,
+        displayName: pickerName, displayNameOutsidePicker: parameterLabel(row.name,
           effort === undefined ? [] : [{ id: "reasoning", value: effort }], parameterDefinitions),
         isMaxMode: false, isDefaultNonMaxConfig: isDefault, isDefaultMaxConfig: isDefault };
     }));

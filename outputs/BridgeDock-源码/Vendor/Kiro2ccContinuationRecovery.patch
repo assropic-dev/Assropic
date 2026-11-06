@@ -1,0 +1,253 @@
+diff --git a/src/anthropic/handlers/stream.rs b/src/anthropic/handlers/stream.rs
+index 89eff73..8c9410b 100644
+--- a/src/anthropic/handlers/stream.rs
++++ b/src/anthropic/handlers/stream.rs
+@@ -121,8 +121,10 @@ pub(crate) async fn handle_stream_request(
+     // 生成初始事件
+     let initial_events = ctx.generate_initial_events();
+ 
+-    // 创建 SSE 流；保留会话的 continuation id，空流时清除其 sticky 绑定。
+-    let continuation_id = crate::kiro::provider::KiroProvider::extract_continuation_id_from_request(request_body);
++    // 创建 SSE 流；记录实际发往上游的 continuation id（有恢复映射时为恢复后的 ID），
++    // 空流时在该 ID 上登记恢复并清除其 sticky 绑定。
++    let continuation_id = crate::kiro::provider::KiroProvider::extract_continuation_id_from_request(request_body)
++        .map(|client_id| provider.effective_continuation_id(&client_id));
+     let stream = create_sse_stream(
+         response,
+         ctx,
+@@ -447,6 +449,7 @@ fn create_sse_stream(
+                                     ctx.generate_final_events()
+                                 } else {
+                                     if let Some(cid) = continuation_id.as_deref() {
++                                        provider.mark_empty_continuation(cid);
+                                         provider.token_manager().evict_sticky(cid);
+                                     }
+                                     vec![empty_response_error_event(false)]
+@@ -603,6 +606,7 @@ fn create_sse_stream(
+                                     out_events = ctx.generate_final_events();
+                                 } else {
+                                     if let Some(cid) = continuation_id.as_deref() {
++                                        provider.mark_empty_continuation(cid);
+                                         provider.token_manager().evict_sticky(cid);
+                                     }
+                                     out_events.push(empty_response_error_event(false));
+diff --git a/src/kiro/provider/api.rs b/src/kiro/provider/api.rs
+index a4f470a..52e5c6a 100644
+--- a/src/kiro/provider/api.rs
++++ b/src/kiro/provider/api.rs
+@@ -11,8 +11,9 @@ impl KiroProvider {
+         thinking_adaptive_requested: bool,
+         bound_ids: &[u64],
+     ) -> anyhow::Result<(reqwest::Response, u64)> {
++        let recovered_body = self.recover_continuation_request(request_body);
+         self.call_api_with_retry(
+-            request_body,
++            &recovered_body,
+             false,
+             is_compact,
+             thinking_adaptive_requested,
+@@ -43,8 +44,9 @@ impl KiroProvider {
+         thinking_adaptive_requested: bool,
+         bound_ids: &[u64],
+     ) -> anyhow::Result<(reqwest::Response, u64)> {
++        let recovered_body = self.recover_continuation_request(request_body);
+         self.call_api_with_retry(
+-            request_body,
++            &recovered_body,
+             true,
+             is_compact,
+             thinking_adaptive_requested,
+diff --git a/src/kiro/provider/core.rs b/src/kiro/provider/core.rs
+index e221e7d..bf8ac45 100644
+--- a/src/kiro/provider/core.rs
++++ b/src/kiro/provider/core.rs
+@@ -8,6 +8,9 @@
+ use reqwest::Client;
+ use std::collections::HashMap;
+ use std::sync::Arc;
++use std::time::{Duration, Instant};
++
++use uuid::Uuid;
+ 
+ use crate::http_client::{ProxyConfig, build_client};
+ use crate::kiro::endpoint::{Endpoint, EndpointBucketRegistry, EndpointName};
+@@ -72,6 +75,23 @@ pub struct KiroProvider {
+     pub(crate) failure_log_store: Option<Arc<FailureLogStore>>,
+     /// 端点级 429 状态注册表（多端点 LB 使用）
+     pub(crate) endpoint_registry: Arc<EndpointBucketRegistry>,
++    /// 会话连续空流后的上游 continuation 恢复映射。
++    /// Cursor 会继续发送旧 conversationId；这里把它稳定改写到新上游会话。
++    continuation_recovery: Mutex<HashMap<String, ContinuationRecovery>>,
++}
++
++const CONTINUATION_RECOVERY_TTL: Duration = Duration::from_secs(60 * 60);
++
++/// 同一客户端会话最多启用的恢复上游会话数（含第一次恢复），超过后不再开新会话，避免无限跳转。
++const MAX_CONTINUATION_ROTATIONS: u32 = 3;
++
++#[derive(Clone)]
++struct ContinuationRecovery {
++    conversation_id: String,
++    continuation_id: String,
++    touched_at: Instant,
++    /// 已启用的恢复会话数
++    rotations: u32,
+ }
+ 
+ #[allow(dead_code)] // 拆分自原 provider.rs：部分方法仅测试/预留使用
+@@ -101,6 +121,7 @@ impl KiroProvider {
+             throttle_log_store: None,
+             failure_log_store: None,
+             endpoint_registry: Arc::new(EndpointBucketRegistry::new()),
++            continuation_recovery: Mutex::new(HashMap::new()),
+         }
+     }
+ 
+@@ -235,6 +256,101 @@ impl KiroProvider {
+             .map(|s| s.to_string())
+     }
+ 
++    /// 客户端会话当前应使用的上游 continuation：存在恢复映射时返回恢复后的 ID，否则原样返回。
++    /// 流处理据此记录实际发往上游的 ID，使空流标记与粘性驱逐作用在同一个键上。
++    pub(crate) fn effective_continuation_id(&self, client_id: &str) -> String {
++        let mut map = self.continuation_recovery.lock();
++        map.retain(|_, value| value.touched_at.elapsed() < CONTINUATION_RECOVERY_TTL);
++        map.get(client_id)
++            .map(|value| value.continuation_id.clone())
++            .unwrap_or_else(|| client_id.to_string())
++    }
++
++    /// 记录一次空流。`upstream_id` 是刚刚实际发往上游的 continuation：
++    /// - 若它已是某个客户端会话的恢复目标，说明恢复后的上游会话也空流，换成新的 ID（有上限）；
++    /// - 否则它就是客户端原始 ID，为其建立第一次恢复映射。
++    /// 客户端仍发送旧 ID，因此映射按旧 ID 保存，历史上下文保持不变。
++    pub fn mark_empty_continuation(&self, upstream_id: &str) {
++        if upstream_id.is_empty() {
++            return;
++        }
++        let mut map = self.continuation_recovery.lock();
++        map.retain(|_, value| value.touched_at.elapsed() < CONTINUATION_RECOVERY_TTL);
++
++        if let Some((client_id, entry)) = map
++            .iter_mut()
++            .find(|(_, value)| value.continuation_id == upstream_id)
++        {
++            if entry.rotations >= MAX_CONTINUATION_ROTATIONS {
++                tracing::warn!(
++                    client_continuation_id = %client_id,
++                    rotations = entry.rotations,
++                    "恢复后的上游会话仍然空流，已达到恢复上限，不再开新会话"
++                );
++                return;
++            }
++            entry.conversation_id = Uuid::new_v4().to_string();
++            entry.continuation_id = Uuid::new_v4().to_string();
++            entry.rotations += 1;
++            entry.touched_at = Instant::now();
++            tracing::warn!(
++                client_continuation_id = %client_id,
++                new_continuation_id = %entry.continuation_id,
++                rotations = entry.rotations,
++                "恢复后的上游会话空流，切换到新的上游 continuation"
++            );
++            return;
++        }
++
++        if map.contains_key(upstream_id) {
++            // 同一会话的并发请求已建立映射，本次结果不再触发轮换。
++            return;
++        }
++
++        let recovery = ContinuationRecovery {
++            conversation_id: Uuid::new_v4().to_string(),
++            continuation_id: Uuid::new_v4().to_string(),
++            touched_at: Instant::now(),
++            rotations: 1,
++        };
++        tracing::warn!(
++            old_continuation_id = %upstream_id,
++            new_continuation_id = %recovery.continuation_id,
++            "空流会话已切换到新的上游 continuation"
++        );
++        map.insert(upstream_id.to_string(), recovery);
++    }
++
++    /// 将客户端继续发送的旧会话 ID 改写为故障恢复后的上游会话 ID。
++    pub(crate) fn recover_continuation_request(&self, body: &str) -> String {
++        let Some(old_id) = Self::extract_continuation_id_from_request(body) else {
++            return body.to_string();
++        };
++        let recovery = {
++            let mut map = self.continuation_recovery.lock();
++            map.retain(|_, value| value.touched_at.elapsed() < CONTINUATION_RECOVERY_TTL);
++            map.get(&old_id).cloned()
++        };
++        let Some(recovery) = recovery else {
++            return body.to_string();
++        };
++        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(body) else {
++            return body.to_string();
++        };
++        let Some(state) = value.get_mut("conversationState").and_then(|v| v.as_object_mut()) else {
++            return body.to_string();
++        };
++        state.insert(
++            "conversationId".to_string(),
++            serde_json::Value::String(recovery.conversation_id),
++        );
++        state.insert(
++            "agentContinuationId".to_string(),
++            serde_json::Value::String(recovery.continuation_id),
++        );
++        serde_json::to_string(&value).unwrap_or_else(|_| body.to_string())
++    }
++
+     /// 从请求体中提取 agentTaskType
+     ///
+     /// 提取 conversationState.agentTaskType，用于设置 x-amzn-kiro-agent-mode 请求头
+diff --git a/src/kiro/provider/tests.rs b/src/kiro/provider/tests.rs
+index 8f436b7..b38cb91 100644
+--- a/src/kiro/provider/tests.rs
++++ b/src/kiro/provider/tests.rs
+@@ -20,6 +20,41 @@ mod tests {
+         KiroProvider::new(Arc::new(tm))
+     }
+ 
++    #[test]
++    fn test_empty_continuation_recovery_rewrites_and_bounds_rotations() {
++        let provider = create_test_provider(Config::default(), KiroCredentials::default());
++        let body = r#"{"conversationState":{"conversationId":"old-conversation","agentContinuationId":"old-continuation"}}"#;
++        assert_eq!(provider.recover_continuation_request(body), body);
++        assert_eq!(provider.effective_continuation_id("old-continuation"), "old-continuation");
++
++        // 第一次空流：登记恢复映射，客户端继续发送旧 ID 时改写为新上游会话
++        provider.mark_empty_continuation("old-continuation");
++        let first = provider.recover_continuation_request(body);
++        let first_json: serde_json::Value = serde_json::from_str(&first).unwrap();
++        let first_cont = first_json["conversationState"]["agentContinuationId"]
++            .as_str()
++            .unwrap()
++            .to_string();
++        assert_ne!(first_cont, "old-continuation");
++        assert_ne!(first_json["conversationState"]["conversationId"], "old-conversation");
++        assert_eq!(provider.effective_continuation_id("old-continuation"), first_cont);
++
++        // 同一旧 ID 的晚到报告（请求在映射建立前发出）不会替换已建立的恢复会话
++        provider.mark_empty_continuation("old-continuation");
++        assert_eq!(provider.recover_continuation_request(body), first);
++
++        // 恢复后的上游会话继续空流：逐次轮换，但总数有上限（3 个恢复会话），不会无限开新会话
++        let mut current = first_cont.clone();
++        let mut seen = std::collections::HashSet::new();
++        seen.insert(first_cont);
++        for _ in 0..10 {
++            provider.mark_empty_continuation(&current);
++            current = provider.effective_continuation_id("old-continuation");
++            seen.insert(current.clone());
++        }
++        assert_eq!(seen.len(), 3);
++    }
++
+     #[test]
+     fn test_base_url() {
+         let config = Config::default();

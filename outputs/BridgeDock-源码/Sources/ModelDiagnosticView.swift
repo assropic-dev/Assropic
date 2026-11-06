@@ -162,3 +162,89 @@ struct ModelDiagnosticResultView: View {
         value.map { String(format: "%.2f 秒", $0) } ?? "—"
     }
 }
+
+/// 参数实测结果：每个供应商 × 档位一行，并列出网关最近对真实请求做过的换算。
+struct ParameterProbeView: View {
+    @EnvironmentObject var store: BridgeStore
+    let model: String
+
+    private var passed: Int { store.parameterProbe.filter(\.passed).count }
+
+    var body: some View {
+        Card(padding: 22) {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("参数实测结果").sectionTitle()
+                        Text(model + " · 每个供应商的每个档位各发一条小请求，核对实际落到的供应商和生效档位")
+                            .font(.system(size: 11)).foregroundStyle(mutedInk)
+                    }
+                    Spacer()
+                    if store.parameterProbing {
+                        Pill(text: "实测中 \(store.parameterProbe.count)/\(store.parameterProbePlanned)", tint: mutedInk)
+                    } else if !store.parameterProbe.isEmpty {
+                        Pill(text: passed == store.parameterProbe.count ? "全部符合" : "\(store.parameterProbe.count - passed) 项不符",
+                             tint: passed == store.parameterProbe.count ? healthy : failureTint)
+                    }
+                }
+                if !store.parameterProbe.isEmpty {
+                    VStack(alignment: .leading, spacing: 0) {
+                        row("供应商", "选择", "实际落到", "实际参数", "思考", "首字", "结论", header: true)
+                        ForEach(store.parameterProbe) { result in
+                            Divider().opacity(0.4)
+                            row(result.probe.providerName, result.probe.title, result.servedProviderName ?? "—",
+                                effectiveText(result), result.thinkingCharacters > 0 ? "\(result.thinkingCharacters) 字" : "无",
+                                result.firstText.map { String(format: "%.1fs", $0) } ?? "—", result.verdict,
+                                tint: result.passed ? healthy : failureTint)
+                        }
+                    }.padding(.horizontal, 14).padding(.vertical, 10)
+                        .background(insetSurface.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+                }
+                adjustments
+                Text("“实际参数”取自网关响应头；选到供应商没有的档位时按最接近的一档生效，并标在“→”后。部分上游（如 Claude 订阅的新版 Opus）思考但不回传思考原文，“思考”列为“无”不代表没思考。真实请求会消耗额度。")
+                    .captionText(10)
+            }
+        }
+    }
+
+    private func effectiveText(_ result: ParameterProbeResult) -> String {
+        var parts = result.effective.keys.sorted().map { key -> String in
+            let value = result.effective[key]!
+            return key == "reasoning" ? "思考 " + value : key == "fast" ? (value == "true" ? "快速" : "标准") : key + " " + value
+        }
+        if parts.isEmpty { parts = ["默认"] }
+        if let adjusted = result.adjusted, !adjusted.isEmpty {
+            parts.append("（" + adjusted.replacingOccurrences(of: ">", with: "→").replacingOccurrences(of: ";", with: "，") + "）")
+        }
+        return parts.joined(separator: " ")
+    }
+
+    @ViewBuilder private var adjustments: some View {
+        if !store.gatewayAdjustments.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("最近的参数换算 · 来自真实请求").font(.system(size: 12, weight: .semibold))
+                ForEach(Array(store.gatewayAdjustments.prefix(12).enumerated()), id: \.offset) { _, entry in
+                    Text(entry.date.formatted(date: .omitted, time: .standard) + "  " + entry.model + " · " + entry.provider + "  "
+                         + entry.adjustments.map(\.summary).joined(separator: "，"))
+                        .font(.system(size: 11, design: .monospaced)).foregroundStyle(mutedInk).textSelection(.enabled)
+                }
+            }
+        }
+    }
+
+    private func row(_ provider: String, _ choice: String, _ served: String, _ effective: String, _ thinking: String,
+                     _ first: String, _ verdict: String, header: Bool = false, tint: Color? = nil) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(provider).frame(width: 110, alignment: .leading)
+            Text(choice).frame(width: 96, alignment: .leading)
+            Text(served).frame(width: 110, alignment: .leading)
+            Text(effective).frame(minWidth: 150, maxWidth: .infinity, alignment: .leading)
+            Text(thinking).frame(width: 56, alignment: .leading)
+            Text(first).frame(width: 44, alignment: .leading)
+            Text(verdict).foregroundStyle(tint ?? ink).frame(width: 110, alignment: .leading)
+        }
+        .font(.system(size: header ? 11 : 12, weight: header ? .semibold : .regular))
+        .foregroundStyle(header ? mutedInk : ink)
+        .lineLimit(2).padding(.vertical, 6).textSelection(.enabled)
+    }
+}

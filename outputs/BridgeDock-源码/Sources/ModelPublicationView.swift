@@ -43,6 +43,13 @@ struct ModelPublicationView: View {
     private var visibleIDs: Set<String> { Set(groups.flatMap { $0.models.map(\.id) }) }
     private var selectedCount: Int { store.availableModels.filter { selection.contains($0.id) }.count }
     private var hasSearch: Bool { !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    /// 按当前勾选计算：同名模型的各供应商能力不一致时，选到缺的档位会按最接近的一档生效。
+    private var gaps: [ModelPublishing.CapabilityGap] {
+        ModelPublishing.capabilityGaps(store.availableModels.map { model in
+            var value = model; value.isEnabled = selection.contains(model.id); return value
+        })
+    }
+    @State private var showingGaps = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -73,6 +80,7 @@ struct ModelPublicationView: View {
                     .disabled(visibleIDs.isDisjoint(with: selection))
                     .help("只取消当前筛选结果中的勾选")
             }.disabled(saving || refreshing)
+            if !gaps.isEmpty { gapNotice }
             if !store.running {
                 Label("服务已停止，启动后可获取并保存反代模型。", systemImage: "pause.circle")
                     .font(.system(size: 12)).foregroundStyle(warning)
@@ -133,6 +141,26 @@ struct ModelPublicationView: View {
         .onChange(of: store.availableModels.map(\.id)) { _, _ in
             // A first refresh may finish after the picker opens. Never replace a draft.
             if !edited { loadSelection() }
+        }
+    }
+
+    private var gapNotice: some View {
+        let models = Set(gaps.map(\.publicID)).count
+        return VStack(alignment: .leading, spacing: 6) {
+            Button { showingGaps.toggle() } label: {
+                Label("\(models) 个合并模型的供应商能力不一致 · 选到缺的档位时按最接近的一档生效", systemImage: "exclamationmark.triangle")
+                    .font(.system(size: 12))
+                Image(systemName: showingGaps ? "chevron.up" : "chevron.down").font(.system(size: 10))
+            }
+            .buttonStyle(.plain).foregroundStyle(warning)
+            .help("Cursor 里切换这些档位不会换供应商；实际生效的档位会写在模型名后面和响应头里。")
+            .accessibilityIdentifier("model-publication-gaps")
+            if showingGaps {
+                ForEach(gaps) { gap in
+                    Text("\(gap.publicID) · \(gap.provider)：\(gap.detail)")
+                        .font(.system(size: 11)).foregroundStyle(mutedInk).textSelection(.enabled)
+                }
+            }
         }
     }
 

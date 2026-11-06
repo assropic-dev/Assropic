@@ -17,6 +17,9 @@ struct GatewayTestServer {
         let port = Int(CommandLine.arguments[1])!
         let corePort = Int(CommandLine.arguments[2])!
         let kiroPort = CommandLine.arguments.count > 3 ? Int(CommandLine.arguments[3]) : nil
+        // Optional: a Kiro worker that always answers 429, and a port nothing listens on.
+        let busyKiroPort = CommandLine.arguments.count > 4 ? Int(CommandLine.arguments[4]) : nil
+        let deadKiroPort = CommandLine.arguments.count > 5 ? Int(CommandLine.arguments[5]) : nil
         var settings = AppSettings()
         var channel = Channel()
         channel.id = "fixture-channel"; channel.name = "测试渠道一"; channel.prefix = "fixture"
@@ -84,6 +87,11 @@ struct GatewayTestServer {
         precondition(opusProviders.map(\.name) == ["Claude", "Kiro"], "点号与短横线版本号归并到同一个 Claude 模型")
         precondition(opusProviders.map { $0.model.id } == ["claude-opus-5-5", "kiro/claude-opus-5.5"], "真实路由 ID 保持不变")
         precondition(opusProviders.allSatisfy { $0.contextOptions.isEmpty }, "未做长上下文检测时普通渠道不提供上下文档位")
+        var forcedKiroParameters: [String: String]? = ["provider": "provider:anthropic", "reasoning": "high"]
+        let forcedKiro = try ModelGateway.resolve("claude-opus-5-5", in: claudeCatalog + kiroCatalog,
+                                                  parameters: &forcedKiroParameters, preferKiro: true)
+        precondition(forcedKiro?.provider.name == "Kiro" && forcedKiroParameters?["reasoning"] == "high",
+                     "Cursor 请求优先保持在 Kiro 池，即使缓存了 Claude 供应商参数")
         var verified = AppSettings(); verified.verifiedContexts = ["claude-opus-5-5": [262144, 200000]]
         let verifiedOpus = ModelPublishing.catalog(rawModels: [ModelItem(id: "claude-opus-5-5", owner: "anthropic")], settings: verified, accounts: [],
                                                    definitions: ["claude": ["claude-opus-5-5": ModelCapability(contextLength: 1000000)]])
@@ -162,7 +170,64 @@ struct GatewayTestServer {
         let relayCatalog = ModelPublishing.catalog(rawModels: [ModelItem(id: "relay/gpt", owner: "mock")], settings: relaySettings, accounts: [])
         var routedParameters: [String: String]? = ["provider": "channel:gpt-relay", "reasoning": "high", "context": "272000"]
         let relay = try ModelGateway.provider(for: "gpt", in: cursorCatalog + relayCatalog, parameters: &routedParameters)
-        precondition(relay?.id == "relay/gpt" && routedParameters == [:], "provider 选中渠道，不支持的 effort/context 降为默认")
+        precondition(relay?.id == "relay/gpt" && routedParameters == ["reasoning": "medium"],
+                     "provider 选中渠道，不支持的 effort 降到最接近的一档，未验证的上下文回到默认")
+        var traced: [String: String]? = ["provider": "channel:gpt-relay", "reasoning": "high", "context": "272000"]
+        let resolution = try ModelGateway.resolve("gpt", in: cursorCatalog + relayCatalog, parameters: &traced)
+        precondition(resolution?.provider.name == "中转站"
+                     && resolution?.adjustments == [ParameterAdjustment(id: "reasoning", requested: "high", effective: "medium"),
+                                                    ParameterAdjustment(id: "context", requested: "272000", effective: "")],
+                     "每一处换算都被记下")
+        let headers = ModelGateway.resolutionHeaders(provider: resolution!.provider, parameters: traced, adjustments: resolution!.adjustments)
+        precondition(headers["X-BridgeDock-Provider"] == "%E4%B8%AD%E8%BD%AC%E7%AB%99" && headers["X-BridgeDock-Provider-Id"] == "channel%3Agpt-relay"
+                     && headers["X-BridgeDock-Parameters"] == "reasoning=medium" && headers["X-BridgeDock-Adjusted"] == "reasoning:high>medium;context:272000>",
+                     "响应头写明实际供应商、生效参数和换算")
+        // Cursor 账号只接受列出的组合：low + 快速不存在，取最接近的 low + 标准速度。
+        var cursorCombo: [String: String]? = ["provider": cursorCatalog[0].sourceID, "reasoning": "low", "fast": "true"]
+        let combo = try ModelGateway.resolve("gpt", in: cursorCatalog + relayCatalog, parameters: &cursorCombo)
+        precondition(cursorCombo == ["reasoning": "low", "fast": "false"]
+                     && combo?.adjustments == [ParameterAdjustment(id: "fast", requested: "true", effective: "false")],
+                     "Cursor 不存在的组合换成最接近的一组：\(String(describing: cursorCombo))")
+        var cursorMax: [String: String]? = ["provider": cursorCatalog[0].sourceID, "reasoning": "max"]
+        _ = try ModelGateway.resolve("gpt", in: cursorCatalog + relayCatalog, parameters: &cursorMax)
+        precondition(cursorMax?["reasoning"] == "high", "Cursor 账号没有 max 时按 high")
+        precondition(ModelPublishing.nearestEffort("max", in: ["low", "high"]) == "high"
+                     && ModelPublishing.nearestEffort("minimal", in: ["low", "high"]) == "low"
+                     && ModelPublishing.nearestEffort("medium", in: ["low", "high"]) == "low"
+                     && ModelPublishing.nearestEffort("bogus", in: ["low"]) == nil
+                     && ModelPublishing.nearestEffort("high", in: []) == nil, "思考档位取不高于所选的最高一档")
+        precondition(ModelPublishing.nearestContext(1_000_000, in: [200_000, 262_144]) == 262_144
+                     && ModelPublishing.nearestContext(100_000, in: [200_000]) == 200_000
+                     && ModelPublishing.nearestContext(1, in: []) == nil, "上下文取不超过所选的最大一档")
+        let merged = ModelPublishing.catalogEntries(cursorCatalog + relayCatalog).first { $0["id"] as? String == "gpt" }
+        let entries = (merged?["bridgedock_parameters"] as? [String: Any])?["providers"] as? [[String: Any]] ?? []
+        let relayEffective = entries.first { $0["id"] as? String == "channel:gpt-relay" }?["effective"] as? [String: [String: String]]
+        precondition(relayEffective?["reasoning"] == ["low": "medium", "high": "medium"] && relayEffective?["fast"] == ["true": "false"],
+                     "发布给 Cursor 的映射表写明每个不支持的档位实际按哪档：\(String(describing: relayEffective))")
+        let cursorEffective = entries.first { $0["id"] as? String == cursorCatalog[0].sourceID }?["effective"] as? [String: [String: String]]
+        precondition(cursorEffective?["reasoning"] == ["medium": "low"], "Cursor 账号缺的 medium 按 low")
+        let gaps = ModelPublishing.capabilityGaps(cursorCatalog + relayCatalog)
+        precondition(gaps.contains(ModelPublishing.CapabilityGap(publicID: "gpt", provider: "中转站", detail: "思考强度 low→medium、high→medium"))
+                     && gaps.contains(ModelPublishing.CapabilityGap(publicID: "gpt", provider: "中转站", detail: "不支持快速模式，开启后按标准速度"))
+                     && gaps.contains { $0.provider != "中转站" && $0.detail == "思考强度 medium→low" },
+                     "发布时列出合并模型里各供应商能力不一致之处：\(gaps.map(\.detail))")
+        precondition(ModelPublishing.capabilityGaps(relayCatalog).isEmpty, "只有一个供应商时没有不一致")
+        let plan = ModelPublishing.parameterProbePlan(cursorCatalog + relayCatalog, publicID: "gpt")
+        let relayPlan = plan.filter { $0.providerName == "中转站" }
+        precondition(plan.count == 2 * 5 && relayPlan.map(\.title) == ["默认", "思考 low", "思考 medium", "思考 high", "快速"],
+                     "参数实测：每个供应商测默认、并集里的每个思考档位和快速模式：\(plan.map(\.title))")
+        precondition(relayPlan[3].expected == ["reasoning": "medium"]
+                     && relayPlan[3].expectedAdjustments == [ParameterAdjustment(id: "reasoning", requested: "high", effective: "medium")]
+                     && relayPlan[3].expectsThinking && relayPlan[0].expected.isEmpty && !relayPlan[0].expectsThinking
+                     && relayPlan[4].expectedAdjustments == [ParameterAdjustment(id: "fast", requested: "true", effective: "false")],
+                     "实测用例带着网关应生效的档位与换算")
+        precondition(ModelPublishing.parameterHeader("fast=false;reasoning=high;x=%E4%B8%AD") == ["fast": "false", "reasoning": "high", "x": "中"],
+                     "解析网关回写的生效参数头")
+        var result = ParameterProbeResult(probe: relayPlan[3], status: 200, servedProviderKey: "channel:gpt-relay",
+                                          servedProviderName: "中转站", effective: ["reasoning": "medium"], thinkingCharacters: 0)
+        precondition(result.passed && result.verdict == "正常 · 未回传思考原文", "落点与档位都对，没有思考原文时只作说明（部分上游不回传）")
+        result.servedProviderKey = "account:other"; result.servedProviderName = "Claude"
+        precondition(!result.passed && result.verdict == "换到了 Claude", "换了供应商时判为失败")
         var defaultParameters: [String: String]? = ["reasoning": "high"]
         let first = try ModelGateway.provider(for: "gpt", in: cursorCatalog + relayCatalog, parameters: &defaultParameters)
         precondition(first?.id == "cursor-fixture/gpt"
@@ -181,7 +246,13 @@ struct GatewayTestServer {
         do { _ = try ModelGateway.provider(for: "gpt", in: cursorCatalog, parameters: &missing); preconditionFailure("unknown provider") } catch {}
         gateway.update(port: port, corePort: corePort, clientKey: "public-test-key", coreKey: "internal-test-key", catalog: catalog + claudeCatalog + kiroCatalog + cursorCatalog + relayCatalog,
                        coreModels: ["fixture/model-a", "fixture/model-b", "gpt/gpt-image-2", "gpt/gpt-image-2.5", "gpt/gpt-image-2.5-flare"])
-        if let kiroPort { gateway.updateKiro(KiroGatewayRoute(port: kiroPort, keys: ["kiro": "kiro-pool-key", "": "kiro-default-key"])) }
+        if let kiroPort {
+            var workers = [KiroWorkerRoute(id: "2", port: kiroPort, key: "kiro-pool-key", prefix: "kiro", pooled: false),
+                           KiroWorkerRoute(id: "4", port: kiroPort, key: "kiro-default-key", prefix: "", pooled: false)]
+            if let busyKiroPort { workers.append(KiroWorkerRoute(id: "1", port: busyKiroPort, key: "kiro-busy-key", prefix: "kiro", pooled: false)) }
+            if let deadKiroPort { workers.append(KiroWorkerRoute(id: "3", port: deadKiroPort, key: "kiro-dead-key", prefix: "kiro", pooled: false)) }
+            gateway.updateKiro(KiroGatewayRoute(workers: workers))
+        }
         try await gateway.start()
         print("READY", terminator: "\n")
         fflush(stdout)

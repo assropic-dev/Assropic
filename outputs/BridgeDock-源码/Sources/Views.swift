@@ -1671,6 +1671,9 @@ struct ModelsView: View {
                 }
             }
             if let report = store.testReport { ModelDiagnosticResultView(report: report) }
+            if store.parameterProbing || !store.parameterProbe.isEmpty || !store.gatewayAdjustments.isEmpty {
+                ParameterProbeView(model: trimmedModel).environmentObject(store)
+            }
         }
     }
 
@@ -1779,6 +1782,15 @@ struct ModelsView: View {
                     }
                 }
                 Spacer()
+                if store.parameterProbing {
+                    Button { store.cancelParameterProbe() } label: { Label("停止实测", systemImage: "stop.fill") }
+                } else if !store.testing {
+                    Button { store.startParameterProbe(trimmedModel) } label: { Label("参数实测", systemImage: "slider.horizontal.3") }
+                        .buttonStyle(WorkspaceButtonStyle())
+                        .disabled(!store.running || providers.isEmpty)
+                        .help("对该模型每个供应商的每个思考档位各发一条小请求，核对实际落到的供应商和生效档位；会消耗少量额度")
+                        .accessibilityIdentifier("model-parameter-probe")
+                }
                 if store.testing {
                     Button { store.cancelModelTest() } label: { Label("取消测试", systemImage: "stop.fill") }
                 } else {

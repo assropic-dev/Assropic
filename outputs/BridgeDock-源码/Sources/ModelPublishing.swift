@@ -9,7 +9,7 @@ struct PublishedModel: Identifiable {
     let sourceName: String
     let modelName: String
     let owner: String
-    let isEnabled: Bool
+    var isEnabled: Bool
     let metadata: [String: Any]
     var capability: ModelCapability? = nil
     var cursorRoute: CursorModelRoute? = nil
@@ -257,6 +257,80 @@ enum ModelPublishing {
             model.workModel?.defaultContext ?? model.cursorRoute?.defaultParameters["context"].flatMap(Int.init) ?? contextOptions.last
         }
 
+        /// 实际可选的思考档位；"none" 只表示“沿用默认”，不算一档。
+        var effortOptions: [String] {
+            if let cursor = model.cursorRoute, !cursor.variants.isEmpty {
+                return ModelCapability.sortedEfforts(cursor.variants.compactMap { $0.parameters["reasoning"] }).filter { $0 != "none" }
+            }
+            return (capability?.reasoningEfforts ?? []).filter { $0 != "none" }
+        }
+
+        /// 本供应商不支持的档位 → 实际生效值（"" 表示按供应商默认），供 Cursor 标注。
+        func effectiveMap(efforts: [String], contexts: [Int], fast: Bool) -> [String: [String: String]] {
+            var result: [String: [String: String]] = [:]
+            let reasoning = efforts.filter { $0 != "none" && !effortOptions.contains($0) }
+            if !reasoning.isEmpty {
+                result["reasoning"] = Dictionary(uniqueKeysWithValues: reasoning.map { ($0, ModelPublishing.nearestEffort($0, in: effortOptions) ?? "") })
+            }
+            let context = contexts.filter { !contextOptions.contains($0) }
+            if !context.isEmpty {
+                result["context"] = Dictionary(uniqueKeysWithValues: context.map {
+                    (String($0), ModelPublishing.nearestContext($0, in: contextOptions).map(String.init) ?? "")
+                })
+            }
+            if fast, !supportsFast { result["fast"] = ["true": "false"] }
+            return result
+        }
+
+        /// 把客户端选的参数换算成本供应商真正支持的值；每处换算记一条，供响应头和诊断使用。
+        func resolve(_ values: [String: String]) -> (values: [String: String], adjustments: [ParameterAdjustment]) {
+            var result = values
+            var adjustments: [ParameterAdjustment] = []
+            if let effort = values["reasoning"], effort != "none", !effortOptions.contains(effort) {
+                let nearest = ModelPublishing.nearestEffort(effort, in: effortOptions)
+                result["reasoning"] = nearest
+                adjustments.append(ParameterAdjustment(id: "reasoning", requested: effort, effective: nearest ?? ""))
+            }
+            if let text = values["context"] {
+                let size = Int(text)
+                if size.map(contextOptions.contains) != true {
+                    let nearest = size.flatMap { ModelPublishing.nearestContext($0, in: contextOptions) }
+                    result["context"] = nearest.map(String.init)
+                    adjustments.append(ParameterAdjustment(id: "context", requested: text, effective: nearest.map(String.init) ?? ""))
+                }
+            }
+            if let fast = values["fast"], !supportsFast {
+                result.removeValue(forKey: "fast")
+                if fast == "true" { adjustments.append(ParameterAdjustment(id: "fast", requested: "true", effective: "false")) }
+            }
+            // Cursor 账号只接受上游列出的组合：逐项换算后仍无此组合时，取最接近的一组。
+            if let cursor = model.cursorRoute, !cursor.variants.isEmpty {
+                let base = cursor.defaultParameters
+                var wanted = base
+                for (key, value) in result where base[key] != nil { wanted[key] = value }
+                if !cursor.variants.contains(where: { $0.parameters == wanted }),
+                   let closest = cursor.variants.min(by: { Self.distance($0.parameters, wanted) < Self.distance($1.parameters, wanted) }) {
+                    for (key, value) in closest.parameters where wanted[key] != value && result[key] != nil {
+                        let requested = values[key] ?? wanted[key] ?? ""
+                        adjustments.removeAll { $0.id == key }
+                        if requested != value { adjustments.append(ParameterAdjustment(id: key, requested: requested, effective: value)) }
+                        result[key] = value
+                    }
+                    for (key, value) in closest.parameters where result[key] == nil && wanted[key] != value { result[key] = value }
+                }
+            }
+            return (result, adjustments)
+        }
+
+        /// 思考档位差得最多扣分，其次是快速模式，最后是上下文。
+        static func distance(_ variant: [String: String], _ wanted: [String: String]) -> Int {
+            let rank = { (value: String?) in value.flatMap { ModelCapability.effortOrder.firstIndex(of: $0) } ?? 0 }
+            var score = abs(rank(variant["reasoning"]) - rank(wanted["reasoning"])) * 4
+            if variant["fast"] != wanted["fast"] { score += 2 }
+            if variant["context"] != wanted["context"] { score += 1 }
+            return score
+        }
+
         var catalogEntry: [String: Any] {
             var entry: [String: Any] = ["id": key, "name": name]
             if let length = capability?.contextLength ?? contextOptions.last { entry["context_length"] = length }
@@ -310,8 +384,76 @@ enum ModelPublishing {
             definitions.append(["id": "reasoning", "name": "思考强度", "values": efforts.map { ["id": $0, "label": labels[$0] ?? $0] }])
         }
         definitions.append(["id": "provider", "name": "供应商", "values": providers.map { ["id": $0.key, "label": $0.name] }])
-        value["bridgedock_parameters"] = ["version": 2, "definitions": definitions, "providers": providers.map(\.catalogEntry)] as [String: Any]
+        // 每个供应商对全部档位都给出实际生效值：选中它不支持的档位时，Cursor 仍留在这个供应商，
+        // 由网关按这里的映射降到最接近的档位，而不是悄悄换成另一个供应商。
+        let entries: [[String: Any]] = providers.map { provider in
+            var entry = provider.catalogEntry
+            let effective = provider.effectiveMap(efforts: efforts, contexts: contexts, fast: providers.contains(where: \.supportsFast))
+            if !effective.isEmpty { entry["effective"] = effective }
+            return entry
+        }
+        value["bridgedock_parameters"] = ["version": 2, "definitions": definitions, "providers": entries] as [String: Any]
         return value
+    }
+
+    /// 档位按 `ModelCapability.effortOrder` 排序；取不高于所请求档位的最高一档，没有就取最低一档。
+    static func nearestEffort(_ requested: String, in options: [String]) -> String? {
+        let order = ModelCapability.effortOrder
+        let rank = { (value: String) in order.firstIndex(of: value) ?? -1 }
+        guard !options.isEmpty, rank(requested) >= 0 else { return nil }
+        if options.contains(requested) { return requested }
+        let sorted = options.sorted { rank($0) < rank($1) }
+        return sorted.last { rank($0) <= rank(requested) } ?? sorted.first
+    }
+
+    /// 取不超过所请求预算的最大档，没有就取最小一档。
+    static func nearestContext(_ requested: Int, in options: [Int]) -> Int? {
+        let sorted = options.sorted()
+        guard !sorted.isEmpty else { return nil }
+        return sorted.last { $0 <= requested } ?? sorted.first
+    }
+
+    /// 合并模型里各供应商能力不一致之处。选到某供应商没有的档位时会按最接近的档位生效。
+    struct CapabilityGap: Equatable, Identifiable {
+        let publicID: String
+        let provider: String
+        let detail: String
+        var id: String { publicID + "|" + provider + "|" + detail }
+    }
+
+    static func capabilityGaps(_ catalog: [PublishedModel]) -> [CapabilityGap] {
+        var seen: Set<String> = []
+        var gaps: [CapabilityGap] = []
+        for model in catalog where model.isEnabled && seen.insert(model.publicID).inserted {
+            let members = providers(in: catalog, publicID: model.publicID)
+            guard members.count > 1 else { continue }
+            let efforts = ModelCapability.sortedEfforts(members.flatMap(\.effortOptions))
+            let contexts = Array(Set(members.flatMap(\.contextOptions))).sorted()
+            let fast = members.contains(where: \.supportsFast)
+            for member in members {
+                let missing = efforts.filter { !member.effortOptions.contains($0) }
+                if !missing.isEmpty {
+                    let detail: String
+                    if member.effortOptions.isEmpty { detail = "未声明思考强度，选任何档位都按该供应商默认" }
+                    else {
+                        let pairs = missing.map { "\($0)→\(nearestEffort($0, in: member.effortOptions) ?? "默认")" }
+                        detail = "思考强度 " + pairs.joined(separator: "、")
+                    }
+                    gaps.append(CapabilityGap(publicID: model.publicID, provider: member.name, detail: detail))
+                }
+                let lacking = contexts.filter { !member.contextOptions.contains($0) }
+                if !lacking.isEmpty, !member.contextOptions.isEmpty {
+                    let pairs = lacking.map { "\(tokenLabel($0))→\(nearestContext($0, in: member.contextOptions).map(tokenLabel) ?? "默认")" }
+                    gaps.append(CapabilityGap(publicID: model.publicID, provider: member.name, detail: "上下文 " + pairs.joined(separator: "、")))
+                } else if !lacking.isEmpty {
+                    gaps.append(CapabilityGap(publicID: model.publicID, provider: member.name, detail: "上下文档位未验证，选任何档位都按该供应商默认"))
+                }
+                if fast, !member.supportsFast {
+                    gaps.append(CapabilityGap(publicID: model.publicID, provider: member.name, detail: "不支持快速模式，开启后按标准速度"))
+                }
+            }
+        }
+        return gaps
     }
 
     static func catalogEntries(_ catalog: [PublishedModel]) -> [[String: Any]] {
@@ -391,5 +533,105 @@ enum ModelPublishing {
             let order = $0.name.localizedStandardCompare($1.name)
             return order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
         }
+    }
+}
+
+
+/// 一处参数换算：客户端选了 `requested`，本次实际按 `effective`（"" 表示供应商默认）。
+struct ParameterAdjustment: Equatable, Codable {
+    let id: String
+    let requested: String
+    let effective: String
+
+    var summary: String {
+        let name = ["reasoning": "思考强度", "context": "上下文", "fast": "快速模式"][id] ?? id
+        let show = { (value: String) -> String in
+            if value.isEmpty { return "默认" }
+            if self.id == "context", let size = Int(value) { return ModelPublishing.tokenLabel(size) }
+            if self.id == "fast" { return value == "true" ? "开" : "关" }
+            return value
+        }
+        return "\(name) \(show(requested))→\(show(effective))"
+    }
+}
+
+/// 参数实测的一条用例：指定供应商与参数发一条小请求，核对实际落到的供应商和生效档位。
+struct ParameterProbeCase: Identifiable, Equatable {
+    let providerKey: String
+    let providerName: String
+    let parameters: [String: String]
+    /// 网关应生效的参数（只含 reasoning / fast）与应发生的换算。
+    let expected: [String: String]
+    let expectedAdjustments: [ParameterAdjustment]
+
+    var id: String { providerKey + "|" + parameters.keys.sorted().map { $0 + "=" + parameters[$0]! }.joined(separator: ",") }
+    var title: String {
+        if parameters.isEmpty { return "默认" }
+        var parts: [String] = []
+        if let effort = parameters["reasoning"] { parts.append("思考 " + effort) }
+        if parameters["fast"] == "true" { parts.append("快速") }
+        return parts.joined(separator: " · ")
+    }
+    /// 中等及以上档位应能看到思考内容。
+    var expectsThinking: Bool { ["medium", "high", "xhigh", "max"].contains(expected["reasoning"] ?? "") }
+}
+
+extension ModelPublishing {
+    /// 每个供应商：默认一条、并集里的每个思考档位各一条、有快速模式时再加一条。上下文档位不在这里测（长上下文实测另有入口）。
+    static func parameterProbePlan(_ catalog: [PublishedModel], publicID: String) -> [ParameterProbeCase] {
+        let members = providers(in: catalog, publicID: publicID)
+        let efforts = ModelCapability.sortedEfforts(members.flatMap(\.effortOptions))
+        let fast = members.contains(where: \.supportsFast)
+        var cases: [ParameterProbeCase] = []
+        for member in members {
+            var requests: [[String: String]] = [[:]]
+            requests += efforts.map { ["reasoning": $0] }
+            if fast { requests.append(["fast": "true"]) }
+            for request in requests {
+                let resolved = member.resolve(request)
+                cases.append(ParameterProbeCase(providerKey: member.key, providerName: member.name, parameters: request,
+                                                expected: resolved.values.filter { ["reasoning", "fast"].contains($0.key) },
+                                                expectedAdjustments: resolved.adjustments))
+            }
+        }
+        return cases
+    }
+
+    /// 解析 `X-BridgeDock-Parameters`（`reasoning=high;fast=false`，值经百分号编码）。
+    static func parameterHeader(_ text: String?) -> [String: String] {
+        var result: [String: String] = [:]
+        for pair in (text ?? "").split(separator: ";") {
+            let parts = pair.split(separator: "=", maxSplits: 1).map(String.init)
+            guard parts.count == 2 else { continue }
+            result[parts[0]] = parts[1].removingPercentEncoding ?? parts[1]
+        }
+        return result
+    }
+}
+
+/// 参数实测的一条结果。
+struct ParameterProbeResult: Identifiable, Equatable {
+    let probe: ParameterProbeCase
+    var status: Int?
+    var servedProviderKey: String?
+    var servedProviderName: String?
+    var effective: [String: String] = [:]
+    var adjusted: String?
+    var thinkingCharacters = 0
+    var firstText: TimeInterval?
+    var failure: String?
+
+    var id: String { probe.id }
+    var landedOnChosen: Bool { servedProviderKey == probe.providerKey }
+    var parametersMatch: Bool { effective.filter { ["reasoning", "fast"].contains($0.key) } == probe.expected }
+    var missingThinking: Bool { probe.expectsThinking && thinkingCharacters == 0 }
+    var passed: Bool { status == 200 && failure == nil && landedOnChosen && parametersMatch }
+    var verdict: String {
+        if let failure { return failure }
+        guard status == 200 else { return "HTTP \(status.map(String.init) ?? "无响应")" }
+        if !landedOnChosen { return "换到了 " + (servedProviderName ?? "未知供应商") }
+        if !parametersMatch { return "生效参数与预期不符" }
+        if missingThinking { return "正常 · 未回传思考原文" }
+        return "正常"
     }
 }

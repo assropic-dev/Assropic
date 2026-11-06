@@ -86,8 +86,10 @@ enum KiroRuntimeCredentials {
         return groups.mapValues { $0.sorted() }
     }
 
-    /// Key group name for the shared pool, matching the gateway's lookup.
-    static let poolGroup = KiroGatewayRoute.poolKey
+    /// Key group name for a key bound to several accounts. Prefixes come from
+    /// `LocalSubscriptionIdentity` and never contain "*", so it cannot collide with one.
+    /// A per-account worker serves one account and never creates this group.
+    static let poolGroup = "*"
 
     /// With two or more enabled accounts, one extra key is bound to all of them. kiro2cc's
     /// balanced mode then hands new conversations to the accounts in turn, and its
@@ -212,15 +214,19 @@ enum KiroRuntimeRestart {
     static let stableUptime: TimeInterval = 300
 }
 
-/// Runs kiro2cc-proxy on a private loopback port next to the core.
+/// Runs one kiro2cc-proxy on a private loopback port. `KiroWorkerPool` gives every Kiro account its
+/// own instance (own process, port, folder, HOME, log and token refresh), so accounts never share a
+/// process and one account's trouble cannot stall another's streams.
 @MainActor
 final class KiroRuntime {
     typealias Accounts = [(name: String, value: [String: Any])]
-    static let port = 18421
     /// kiro2cc caches usage limits; re-reading them keeps the plan title and quota current.
     static let balanceInterval: UInt64 = 30 * 60
+    let port: Int
     let directory: URL
     let accountsDirectory: URL
+    /// The single account file this instance serves; nil serves every Kiro account (tests only).
+    let accountName: String?
     let executable: URL
     /// Routing prefix ("" for unprefixed accounts) to kiro2cc client key.
     private(set) var keys: [String: String] = [:]
@@ -249,17 +255,21 @@ final class KiroRuntime {
     private var resyncRequested = false
     var onReadyChange: ((Bool) -> Void)?
 
-    init(dataDirectory: URL) {
-        directory = dataDirectory.appendingPathComponent("kiro-runtime")
-        accountsDirectory = dataDirectory.appendingPathComponent("accounts")
-        executable = Bundle.main.resourceURL!.appendingPathComponent("kiro2cc-proxy")
+    init(directory: URL, accountsDirectory: URL, port: Int, accountName: String?) {
+        self.directory = directory
+        self.accountsDirectory = accountsDirectory
+        self.port = port
+        self.accountName = accountName
+        executable = Self.executableURL
         let configuration = URLSessionConfiguration.ephemeral
         configuration.connectionProxyDictionary = [:]
         configuration.timeoutIntervalForRequest = 5
         session = URLSession(configuration: configuration)
     }
 
-    var baseURL: String { "http://127.0.0.1:\(Self.port)" }
+    nonisolated static var executableURL: URL { Bundle.main.resourceURL!.appendingPathComponent("kiro2cc-proxy") }
+
+    var baseURL: String { "http://127.0.0.1:\(port)" }
 
     /// Brings kiro2cc in line with the Kiro account files. Account changes are applied to the
     /// running process; only a new upstream proxy, or a change the admin API cannot express,
@@ -355,7 +365,7 @@ final class KiroRuntime {
         try privateWrite(jsonData(ids), to: directory.appendingPathComponent("bridgedock-ids.json"))
         try privateWrite(jsonData(credentials), to: directory.appendingPathComponent("credentials.json"))
         let admin = UUID().uuidString + UUID().uuidString
-        var config: [String: Any] = ["host": "127.0.0.1", "port": Self.port, "region": "us-east-1", "adminPsw": admin,
+        var config: [String: Any] = ["host": "127.0.0.1", "port": port, "region": "us-east-1", "adminPsw": admin,
                                      "loadBalancingMode": "balanced", "clientTokenPassthrough": true,
                                      "thinkingAsText": false, "showSessionCredits": false]
         if !proxyURL.isEmpty && proxyURL != "direct" { config["proxyUrl"] = proxyURL }
@@ -611,17 +621,18 @@ final class KiroRuntime {
     }
 
     private func kiroAccounts() async -> Accounts {
-        let accountsDirectory = accountsDirectory
-        let found: [(String, Data)] = await withCheckedContinuation { done in
-            fileQueue.async {
-                let names = (try? FileManager.default.contentsOfDirectory(atPath: accountsDirectory.path)) ?? []
-                done.resume(returning: names.filter { $0.hasSuffix(".json") }.sorted().compactMap { name in
-                    (try? Data(contentsOf: accountsDirectory.appendingPathComponent(name))).map { (name, $0) }
-                })
-            }
+        let accountsDirectory = accountsDirectory, only = accountName
+        return await withCheckedContinuation { done in
+            fileQueue.async { done.resume(returning: Self.readKiroAccounts(accountsDirectory, only: only)) }
         }
-        return found.compactMap { name, data in
-            guard let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+    }
+
+    /// Kiro account documents in `accountsDirectory`, sorted by file name; `only` keeps one file.
+    nonisolated static func readKiroAccounts(_ accountsDirectory: URL, only: String? = nil) -> Accounts {
+        let names = only.map { [$0] } ?? ((try? FileManager.default.contentsOfDirectory(atPath: accountsDirectory.path)) ?? [])
+        return names.filter { $0.hasSuffix(".json") }.sorted().compactMap { name in
+            guard let data = try? Data(contentsOf: accountsDirectory.appendingPathComponent(name)),
+                  let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   (value["type"] as? String)?.lowercased() == "kiro" else { return nil }
             return (name, value)
         }
@@ -649,7 +660,10 @@ final class KiroRuntime {
         return object.compactMapValues { ($0 as? NSNumber)?.uint64Value }
     }
 
-    private func stopOrphan() {
+    private func stopOrphan() { Self.stopOrphan(directory: directory, executable: executable) }
+
+    /// Stops a kiro2cc left running from `directory` by an earlier BridgeDock (crash or upgrade).
+    nonisolated static func stopOrphan(directory: URL, executable: URL) {
         let url = directory.appendingPathComponent("process.json")
         guard let data = try? Data(contentsOf: url),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

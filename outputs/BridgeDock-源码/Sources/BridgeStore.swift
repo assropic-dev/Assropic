@@ -34,6 +34,13 @@ final class BridgeStore: ObservableObject {
     @Published var testResult = ""
     @Published var testing = false
     @Published var testReport: ModelTestReport?
+    /// 参数实测：每条用例一行，按发出顺序追加。
+    @Published var parameterProbe: [ParameterProbeResult] = []
+    @Published var parameterProbePlanned = 0
+    @Published var parameterProbing = false
+    private var parameterProbeTask: Task<Void, Never>?
+    /// 网关最近的参数换算（选到供应商不支持的档位时），最新在前。
+    @Published var gatewayAdjustments: [GatewayAdjustment] = []
     private var modelTestTask: Task<Void, Never>?
     @Published var pendingImport: ChannelImport?
     @Published var importLinkStatus = ""
@@ -51,14 +58,22 @@ final class BridgeStore: ObservableObject {
     @Published var cursorSessionReady = false
     let cursorSession = CursorSessionServer()
     @Published var kiroStreaming = false
-    private(set) lazy var kiroRuntime: KiroRuntime = {
-        let runtime = KiroRuntime(dataDirectory: dataDirectory)
-        runtime.onReadyChange = { [weak self, unowned runtime] ready in
+    /// One kiro2cc worker per Kiro account; the gateway's router places conversations on them.
+    private(set) lazy var kiroRuntime: KiroWorkerPool = {
+        let pool = KiroWorkerPool(dataDirectory: dataDirectory)
+        let journal = KiroRouterJournal(directory: pool.directory)
+        let router = modelGateway.kiroRouter
+        router.onEvent = { [weak router] line in journal.record(line, snapshot: router?.snapshot()) }
+        router.onStateChange = { [weak router] in journal.scheduleState { router?.snapshot() } }
+        var announced: String?
+        pool.onRouteChange = { [weak self] route in
             guard let self else { return }
-            self.kiroStreaming = ready
-            self.modelGateway.updateKiro(ready ? KiroGatewayRoute(port: KiroRuntime.port, keys: runtime.keys, pooledPrefixes: runtime.pooledPrefixes) : nil)
+            self.kiroStreaming = route != nil
+            self.modelGateway.updateKiro(route)
+            let summary = "可用 Kiro 账号：" + (route?.workers.map { "#\($0.id)(端口 \($0.port))" }.joined(separator: "、") ?? "无")
+            if summary != announced { announced = summary; journal.record(summary, snapshot: router.snapshot()) }
         }
-        return runtime
+        return pool
     }()
     let dataDirectory: URL
     private let stateURL: URL
@@ -113,6 +128,13 @@ final class BridgeStore: ObservableObject {
             self.error = cursorStatus
         }
         if cursorIdentity.enabled { cursorStatus = "已记住 BD 模式 · 等待服务启动" }
+        modelGateway.onAdjustment = { [weak self] entry in
+            Task { @MainActor in
+                guard let self else { return }
+                self.gatewayAdjustments.insert(entry, at: 0)
+                if self.gatewayAdjustments.count > 50 { self.gatewayAdjustments.removeLast(self.gatewayAdjustments.count - 50) }
+            }
+        }
     }
 
     func record(_ message: String, failed: Bool = false) {
@@ -526,6 +548,77 @@ final class BridgeStore: ObservableObject {
     /// 公开 ID 不再带渠道前缀，界面改为显示渠道自身的路由前缀。
     func publicPrefix(source: String) -> String? { nil }
 
+    /// 对合并模型的每个供应商、每个思考档位（及快速模式）各发一条小请求，核对实际落到的供应商与生效档位。
+    func startParameterProbe(_ publicID: String) {
+        guard running, !publicID.isEmpty, !testing, !parameterProbing else { return }
+        let plan = ModelPublishing.parameterProbePlan(availableModels, publicID: publicID)
+        guard !plan.isEmpty else { return }
+        parameterProbe = []; parameterProbePlanned = plan.count; parameterProbing = true
+        let endpoint = URL(string: baseURL + "/v1/chat/completions")!, key = settings.clientKey
+        parameterProbeTask = Task { [weak self] in
+            defer { Task { @MainActor in self?.parameterProbing = false; self?.parameterProbeTask = nil } }
+            for probe in plan {
+                if Task.isCancelled { return }
+                let result = await Self.runParameterProbe(probe, publicID: publicID, endpoint: endpoint, key: key)
+                await MainActor.run { self?.parameterProbe.append(result) }
+            }
+        }
+    }
+
+    func cancelParameterProbe() { parameterProbeTask?.cancel() }
+
+    nonisolated static func runParameterProbe(_ probe: ParameterProbeCase, publicID: String, endpoint: URL, key: String) async -> ParameterProbeResult {
+        var result = ParameterProbeResult(probe: probe)
+        let parameters = [["id": "provider", "value": probe.providerKey]] + probe.parameters.keys.sorted().map { ["id": $0, "value": probe.parameters[$0]!] }
+        let body: [String: Any] = ["model": publicID, "stream": true, "max_tokens": 4096,
+                                   "messages": [["role": "user", "content": "[\(UUID().uuidString)] 一个正数的平方减去它本身等于 72，这个数是多少？只回复数字。"]]]
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"; request.timeoutInterval = 180
+        request.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("BridgeDock parameter-probe", forHTTPHeaderField: "User-Agent")
+        guard let header = try? JSONSerialization.data(withJSONObject: parameters),
+              let encoded = String(decoding: header, as: UTF8.self).addingPercentEncoding(withAllowedCharacters: .alphanumerics),
+              let data = try? JSONSerialization.data(withJSONObject: body) else { result.failure = "无法构造请求"; return result }
+        request.setValue(encoded, forHTTPHeaderField: "X-BridgeDock-Parameters")
+        request.httpBody = data
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = [:]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let started = Date()
+        do {
+            let (bytes, response) = try await session.bytes(for: request)
+            let http = response as? HTTPURLResponse
+            result.status = http?.statusCode
+            let value = { (name: String) in (http?.value(forHTTPHeaderField: name)).flatMap { $0.removingPercentEncoding ?? $0 } }
+            result.servedProviderKey = value("X-BridgeDock-Provider-Id")
+            result.servedProviderName = value("X-BridgeDock-Provider")
+            result.effective = ModelPublishing.parameterHeader(http?.value(forHTTPHeaderField: "X-BridgeDock-Parameters"))
+            result.adjusted = http?.value(forHTTPHeaderField: "X-BridgeDock-Adjusted")
+            var errorText = ""
+            for try await line in bytes.lines {
+                if Task.isCancelled { break }
+                guard line.hasPrefix("data:") else { if result.status != 200 { errorText += line }; continue }
+                let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+                if payload == "[DONE]" { break }
+                guard let object = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any] else { continue }
+                for choice in object["choices"] as? [[String: Any]] ?? [] {
+                    let delta = choice["delta"] as? [String: Any] ?? [:]
+                    let thinking = (delta["reasoning_content"] as? String) ?? (delta["reasoning"] as? String) ?? ""
+                    result.thinkingCharacters += thinking.count
+                    if let text = delta["content"] as? String, !text.isEmpty, result.firstText == nil {
+                        result.firstText = Date().timeIntervalSince(started)
+                    }
+                }
+            }
+            if result.status != 200 { result.failure = "HTTP \(result.status ?? 0) " + String(errorText.prefix(120)) }
+        } catch {
+            result.failure = error.localizedDescription
+        }
+        return result
+    }
+
     /// 按公开 ID 查合并后的供应商（第一个为默认），含各自的 key、名称与能力。
     func providers(for publicID: String) -> [ModelPublishing.Provider] {
         ModelPublishing.providers(in: availableModels, publicID: publicID)
@@ -875,7 +968,7 @@ final class BridgeStore: ObservableObject {
 
     /// provider 为 `providers(for:)` 返回的 key；nil 时网关选默认供应商。
     func startModelTest(_ model: String, wire: String, mode: ModelTestMode, effort: ModelReasoningEffort = .unset, provider: String? = nil) {
-        guard running, !model.isEmpty, !testing, modelTestTask == nil else { return }
+        guard running, !model.isEmpty, !testing, !parameterProbing, modelTestTask == nil else { return }
         modelTestTask = Task { await testModel(model, wire: wire, mode: mode, effort: effort, provider: provider) }
     }
 

@@ -2,13 +2,17 @@ diff --git a/src/anthropic/handlers/stream.rs b/src/anthropic/handlers/stream.rs
 index fbe582e..23ce71c 100644
 --- a/src/anthropic/handlers/stream.rs
 +++ b/src/anthropic/handlers/stream.rs
-@@ -552,7 +552,16 @@ fn create_sse_stream(
+@@ -552,7 +552,33 @@ fn create_sse_stream(
  
                              // 非桥接态（或桥接无待执行搜索）→ 现有收尾路径（零行为变化）
                              let mut out_events = Vec::new();
 -                            if ctx.is_empty_response() {
 +                            if let Some(tool_use_id) = ctx.truncated_tool_use() {
 +                                let elapsed = stream_started_at.elapsed();
++                                if let Some(cid) = continuation_id.as_deref() {
++                                    provider.mark_empty_continuation(cid);
++                                    provider.token_manager().evict_sticky(cid);
++                                }
 +                                tracing::warn!(
 +                                    tool_use_id = %tool_use_id,
 +                                    est_input_tokens = ctx.input_tokens,
@@ -16,22 +20,48 @@ index fbe582e..23ce71c 100644
 +                                    "上游在工具调用参数未完成时结束了流（无 stop、无 meteringEvent），补发 error 事件防止半截工具调用被执行"
 +                                );
 +                                out_events.push(stream_interrupted_error_event_after(elapsed));
++                            } else if ctx.is_unmetered_partial_response() {
++                                let elapsed = stream_started_at.elapsed();
++                                if let Some(cid) = continuation_id.as_deref() {
++                                    provider.mark_empty_continuation(cid);
++                                    provider.token_manager().evict_sticky(cid);
++                                }
++                                tracing::warn!(
++                                    est_input_tokens = ctx.input_tokens,
++                                    output_tokens = ctx.output_tokens(),
++                                    stream_elapsed_secs = elapsed.as_secs(),
++                                    "上游在没有 meteringEvent 时结束了非空流，按中断处理以防止半截响应进入下一轮历史"
++                                );
++                                out_events.push(stream_interrupted_error_event_after(elapsed));
 +                            } else if ctx.is_empty_response() {
                                  let oversized = ctx.empty_response_is_oversized_context();
                                  tracing::warn!(
                                      oversized_context = oversized,
+diff --git a/src/anthropic/handlers/stream.rs b/src/anthropic/handlers/stream.rs
+--- a/src/anthropic/handlers/stream.rs
++++ b/src/anthropic/handlers/stream.rs
+@@ -444,4 +444,8 @@ fn create_sse_stream(
+                             } else {
+                                 let elapsed = stream_started_at.elapsed();
++                                if let Some(cid) = continuation_id.as_deref() {
++                                    provider.mark_empty_continuation(cid);
++                                    provider.token_manager().evict_sticky(cid);
++                                }
+                                 tracing::warn!(
+
 diff --git a/src/anthropic/stream/context/metrics.rs b/src/anthropic/stream/context/metrics.rs
 index d36d615..6836aa1 100644
 --- a/src/anthropic/stream/context/metrics.rs
 +++ b/src/anthropic/stream/context/metrics.rs
-@@ -38,6 +38,23 @@ impl StreamContext {
+@@ -38,6 +38,30 @@ impl StreamContext {
          crate::token::count_tokens(&self.thinking_full_text) as i32
      }
  
 +    /// 上游在工具调用参数输出到一半时就结束了流，返回该工具调用的 id。
 +    ///
-+    /// 三个条件同时成立才算：该工具调用没收到 stop、已收到的参数不是完整 JSON、
-+    /// 整条流没有 meteringEvent（正常完成的流都会带）。实测 Kiro 会这样干净地 EOF，
++    /// 两个条件同时成立才算：该工具调用没收到 stop、整条流没有 meteringEvent
++    /// （正常完成的流都会带）。即使参数恰好已经是完整 JSON，也不能把缺少 stop 的
++    /// 半截工具调用当作正常完成；实测 Kiro 会在这种状态干净地 EOF，
 +    /// 读流不报错；若照常收尾，客户端会拿到 `tool_calls` 结束原因并执行半截参数的
 +    /// 工具调用，再把这段残缺历史带进下一轮，之后上游对该会话持续返回空响应。
 +    pub fn truncated_tool_use(&self) -> Option<&str> {
@@ -39,10 +69,16 @@ index d36d615..6836aa1 100644
 +            return None;
 +        }
 +        self.unfinished_tool_inputs
-+            .iter()
-+            .filter(|(_, input)| serde_json::from_str::<serde_json::Value>(input).is_err())
-+            .map(|(id, _)| id.as_str())
++            .keys()
++            .map(|id| id.as_str())
 +            .min()
++    }
++
++    /// Kiro 没有发 meteringEvent 就干净结束了一个已有内容的流。
++    /// 这类响应可能已经产生了半截文本/思考，若按正常 end_turn 下发，Cursor 会把
++    /// 不完整的 assistant 消息写回历史，下一轮通常只收到空响应。
++    pub fn is_unmetered_partial_response(&self) -> bool {
++        self.metering_usage.is_none() && !self.output_full_text.is_empty()
 +    }
 +
      /// 检测上游是否返回了无效的空/近似空响应。
@@ -102,7 +138,7 @@ diff --git a/src/anthropic/stream/tests/context.rs b/src/anthropic/stream/tests/
 index a991a32..af297c9 100644
 --- a/src/anthropic/stream/tests/context.rs
 +++ b/src/anthropic/stream/tests/context.rs
-@@ -675,4 +675,50 @@ mod tests {
+@@ -675,4 +675,59 @@ mod tests {
              collect_text(&out)
          );
      }
@@ -141,15 +177,24 @@ index a991a32..af297c9 100644
 +    }
 +
 +    #[test]
-+    fn test_unfinished_tool_use_with_metering_or_valid_json_is_kept() {
++    fn test_unfinished_tool_use_with_metering_or_valid_json_is_detected() {
 +        // 有 meteringEvent：上游已正常结算，不改写
 +        let mut metered = StreamContext::new_with_thinking("test-model", 1, false);
 +        metered.process_tool_use(&tool_event("toolu_m", r#"{"path":"/Us"#, false));
 +        metered.process_kiro_event(&metering_event(0.5));
 +        assert_eq!(metered.truncated_tool_use(), None);
-+        // 缺 stop 但参数已是完整 JSON：工具调用可用，不改写
++        // 缺 stop 即使参数恰好是完整 JSON，也必须视为未收尾，不能让半截工具调用进入历史
 +        let mut whole = StreamContext::new_with_thinking("test-model", 1, false);
 +        whole.process_tool_use(&tool_event("toolu_w", r#"{"path":"/a","new_string":"x"}"#, false));
-+        assert_eq!(whole.truncated_tool_use(), None);
++        assert_eq!(whole.truncated_tool_use(), Some("toolu_w"));
++    }
++
++    #[test]
++    fn test_unmetered_text_is_detected_as_partial() {
++        let mut ctx = StreamContext::new_with_thinking("test-model", 1, false);
++        ctx.process_kiro_event(&text_event("已开始处理，但流在收尾前断了"));
++        assert!(ctx.is_unmetered_partial_response());
++        ctx.process_kiro_event(&metering_event(0.5));
++        assert!(!ctx.is_unmetered_partial_response());
 +    }
  }
