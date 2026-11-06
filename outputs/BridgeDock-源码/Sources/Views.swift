@@ -1070,6 +1070,7 @@ struct AccountsView: View {
 
     private func accountHealth(_ account: Account) -> Color {
         if account.disabled { return mutedInk.opacity(0.5) }
+        if store.accountRests[account.id]?.text() != nil { return warning }
         return account.requiresSignIn || account.status == "error" ? warning : healthy
     }
 
@@ -1092,6 +1093,16 @@ struct AccountsView: View {
                 if !account.statusMessage.isEmpty && (account.requiresSignIn || account.status == "error") {
                     Text(store.redacted(account.statusMessage)).font(.system(size: 11)).foregroundStyle(warning).lineLimit(3)
                 }
+                if !account.disabled, let rest = store.accountRests[account.id] {
+                    // Counts down every second; the line disappears when the rest is over.
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        if let text = rest.text(now: context.date) {
+                            Text(text).font(.system(size: 11)).foregroundStyle(warning)
+                                .help(rest.source == "kiro" ? "BridgeDock 的 Kiro 路由暂不向此账号分配新请求；进行中的会话由其他账号临时接手，冷却结束后回到原账号。"
+                                      : "反代内核暂不向此账号分配新请求，到时自动恢复。")
+                        }
+                    }
+                }
                 QuotaSummaryView(target: QuotaTarget(account: account))
             }
             Spacer(minLength: 10)
@@ -1100,6 +1111,9 @@ struct AccountsView: View {
                 Button("账号设置…") { editing = account }
                 Button("查看账号模型…") { inspecting = account }
                 Button("刷新凭据") { Task { await store.refreshAccount(account) } }
+                if store.accountRests[account.id]?.text() != nil {
+                    Button("立即解除冷却") { Task { await store.endRest(account) } }
+                }
                 if let provider = SubscriptionProvider.find(account.loginProvider), !provider.importOnly {
                     if provider.supportsRecovery {
                         Button("重新授权此账号") { Task { await store.beginLogin(provider.id, account: account) } }

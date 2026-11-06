@@ -106,6 +106,27 @@ struct LogicTests {
         let config = settings.coreConfig(dataDirectory: scratch, pluginDirectory: scratch.appendingPathComponent("plugins"))
         check((config["multimedia"] as? [String: Any])?["disable-image-generation"] as? String == "chat",
               "chat requests are not given a hidden image tool")
+        let routing = config["routing"] as? [String: Any] ?? [:]
+        check(routing["session-affinity"] as? Bool == true && routing["session-affinity-subagents"] as? Bool == true
+              && routing["session-affinity-rebind-on"] as? String == "quota" && routing["strategy"] as? String == "round-robin",
+              "conversations stay on one credential; only quota and auth errors move them")
+        check((routing["cooldown"] as? [String: Any])?["save-cooldown-status"] as? Bool == true
+              && (routing["cooldown"] as? [String: Any])?["transient-error-cooldown-seconds"] as? Int == 15
+              && (routing["retry"] as? [String: Any])?["request-retry"] as? Int == 1,
+              "cooldowns survive a core restart and one extra retry round is kept")
+        let streaming = (config["requests"] as? [String: Any])?["streaming"] as? [String: Any] ?? [:]
+        check(streaming["keepalive-seconds"] as? Int == 15 && streaming["bootstrap-retries"] as? Int == 1
+              && streaming["send-keepalive-before-ft"] == nil,
+              "heartbeats bridge long silences, a stream failing before its first byte is retried")
+        let upstream = config["upstream"] as? [String: Any] ?? [:]
+        let claudeUpstream = upstream["claude"] as? [String: Any] ?? [:]
+        let headerDefaults = claudeUpstream["header-defaults"] as? [String: Any] ?? [:]
+        check(headerDefaults["stabilize-device-profile"] as? Bool == true && headerDefaults["timezone"] as? String == TimeZone.current.identifier
+              && headerDefaults["user-agent"] == nil,
+              "each Claude credential keeps one device profile; the core's measured client baseline is not overridden")
+        check(claudeUpstream["model-level-cooling"] as? Bool == true
+              && (upstream["codex"] as? [String: Any])?["model-level-cooling"] as? Bool == true,
+              "a per-model quota cap cools only that model")
         try privateWrite(jsonData(config), to: scratch.appendingPathComponent("config.yaml"))
         try first.write(to: scratch.appendingPathComponent("codex-output.toml"))
         try Data(kimiText.utf8).write(to: scratch.appendingPathComponent("kimi-output.toml"))

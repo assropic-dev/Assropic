@@ -88,6 +88,14 @@ enum KiroSessionKey {
 ///   `cooldown`; afterwards one request probes it, and a success closes the circuit.
 /// - A failed request may be retried on another account before anything reached the client; that
 ///   retry does not move the conversation.
+/// - 429 is a rate limit, not an exhausted quota (kiro2cc reports that as 402 after backing off on its
+///   own): the account rests for its Retry-After (capped at `throttleCap`) and its conversations keep
+///   their home, so the prompt cache there stays warm. Moving them would only shift the burst.
+/// - 401/403 is confirmed before it counts: the first rests the account for `authConfirmCooldown`
+///   (a worker that just restarted can reject its key for a moment); a second one within
+///   `failureWindow` is treated like a quota error.
+/// - Turns served away from home (a retry or a standby) go to the account with the fewest requests in
+///   flight, so a burst of failovers spreads out instead of piling onto one account.
 /// Client errors (400, 404, 413, 422…) describe the request, not the account, and count for nothing.
 final class KiroSessionRouter: @unchecked Sendable {
     struct Policy {
@@ -104,29 +112,50 @@ final class KiroSessionRouter: @unchecked Sendable {
         var unreachableCooldown: TimeInterval = 15
         /// How long a conversation waits for its account to come back to the route before moving.
         var missingGrace: TimeInterval = 60
+        /// Rest after a 429 without a usable Retry-After, and the longest rest a Retry-After can ask for.
+        var throttleDefault: TimeInterval = 5
+        var throttleCap: TimeInterval = 60
+        /// Rest after a first 401/403, before it is confirmed by a second one.
+        var authConfirmCooldown: TimeInterval = 30
     }
 
     enum Outcome: Equatable {
         case success
-        case failure(status: Int)
+        /// `retryAfter`: the upstream's Retry-After in seconds, when it sent one.
+        case failure(status: Int, retryAfter: TimeInterval? = nil)
         case unreachable
         /// The client went away; only the in-flight count changes.
         case cancelled
     }
 
-    enum FailureKind: Equatable { case none, client, soft, hard }
+    /// `throttled`: rate limited (429). `auth`: rejected (401/403), confirmed by a repeat.
+    /// `hard`: out of quota (402). `soft`: transient (408, 409, 5xx).
+    enum FailureKind: Equatable { case none, client, soft, throttled, auth, hard }
 
     static func classify(status: Int) -> FailureKind {
         switch status {
         case 200..<400: return .none
-        case 401, 402, 403: return .hard
-        case 408, 409, 429, 500...599: return .soft
+        case 402: return .hard
+        case 401, 403: return .auth
+        case 429: return .throttled
+        case 408, 409, 500...599: return .soft
         default: return .client
         }
     }
 
     /// Statuses worth one retry on another account, as long as nothing reached the client yet.
-    static func retriesElsewhere(status: Int) -> Bool { [.soft, .hard].contains(classify(status: status)) }
+    static func retriesElsewhere(status: Int) -> Bool { classify(status: status) != .none && classify(status: status) != .client }
+
+    /// Seconds from a Retry-After header: delta-seconds or an HTTP date.
+    static func retryAfter(_ header: String?, now: Date = Date()) -> TimeInterval? {
+        guard let text = header?.trimmingCharacters(in: .whitespaces), !text.isEmpty else { return nil }
+        if let seconds = Double(text) { return seconds >= 0 ? seconds : nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "GMT")
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        return formatter.date(from: text).map { max(0, $0.timeIntervalSince(now)) }
+    }
 
     struct Choice: Equatable {
         let worker: KiroWorkerRoute
@@ -136,7 +165,13 @@ final class KiroSessionRouter: @unchecked Sendable {
 
     struct Snapshot: Encodable {
         struct Session: Encodable { let id: String; let account: String; let idleSeconds: Int; let failures: Int }
-        struct Account: Encodable { let id: String; let inFlight: Int; let sessions: Int; let consecutiveFailures: Int; let circuitOpen: Bool }
+        struct Account: Encodable {
+            let id: String; let inFlight: Int; let sessions: Int; let consecutiveFailures: Int; let circuitOpen: Bool
+            /// Seconds until the account takes new work again; 0 when it is not resting.
+            let restSeconds: Int
+            /// Why it rests: "throttled", "auth", "quota", "failures", "unreachable" or "" when it does not.
+            let restReason: String
+        }
         let sessions: [Session]
         let accounts: [Account]
     }
@@ -154,6 +189,9 @@ final class KiroSessionRouter: @unchecked Sendable {
         var inFlight = 0
         var failures = 0
         var openUntil: Date?
+        var openReason = ""
+        var authFailures = 0
+        var lastAuthFailure: Date?
     }
 
     let policy: Policy
@@ -185,7 +223,7 @@ final class KiroSessionRouter: @unchecked Sendable {
             let closed = remaining.filter { !isOpen($0.id, now) }
             // Every circuit open: trying one still beats failing the request outright.
             let eligible = closed.isEmpty ? remaining : closed
-            guard let session else { return Choice(worker: leastLoaded(eligible, now: now), reason: "new") }
+            guard let session else { return Choice(worker: leastLoaded(eligible, now: now, temporary: true), reason: "new") }
             if var binding = bindings[session] {
                 if let bound = eligible.first(where: { $0.id == binding.worker }) {
                     binding.lastUsed = now
@@ -195,7 +233,7 @@ final class KiroSessionRouter: @unchecked Sendable {
                 }
                 if tried.contains(binding.worker) {
                     // This request failed on the bound account; serve it elsewhere, keep the binding.
-                    return Choice(worker: leastLoaded(eligible, now: now), reason: "retry")
+                    return Choice(worker: leastLoaded(eligible, now: now, temporary: true), reason: "retry")
                 }
                 let present = candidates.contains { $0.id == binding.worker }
                 let missingSince = present ? nil : (binding.missingSince ?? now)
@@ -205,7 +243,7 @@ final class KiroSessionRouter: @unchecked Sendable {
                     binding.lastUsed = now
                     binding.missingSince = missingSince
                     bindings[session] = binding
-                    let stand = leastLoaded(eligible, now: now)
+                    let stand = leastLoaded(eligible, now: now, temporary: true)
                     events.append("会话 \(session) 的账号 #\(binding.worker) \(present ? "熔断中" : "暂不可用")，本轮临时由 #\(stand.id) 处理")
                     return Choice(worker: stand, reason: "standby")
                 }
@@ -252,18 +290,44 @@ final class KiroSessionRouter: @unchecked Sendable {
                 }
                 state.failures = 0
                 state.openUntil = nil
+                state.openReason = ""
+                state.authFailures = 0
+                state.lastAuthFailure = nil
                 if bound, let session { bindings[session]?.failures = 0; bindings[session]?.lastFailure = nil }
             case .unreachable:
                 state.openUntil = now.addingTimeInterval(policy.unreachableCooldown)
+                state.openReason = "unreachable"
                 events.append("账号 #\(worker) 的进程不可达，暂停分配 \(Int(policy.unreachableCooldown)) 秒")
-            case .failure(let status):
-                switch Self.classify(status: status) {
+            case .failure(let status, let retryAfter):
+                var kind = Self.classify(status: status)
+                if kind == .auth {
+                    if let last = state.lastAuthFailure, now.timeIntervalSince(last) > policy.failureWindow { state.authFailures = 0 }
+                    state.authFailures += 1
+                    state.lastAuthFailure = now
+                    if state.authFailures >= 2 { kind = .hard }
+                }
+                switch kind {
                 case .none, .client:
                     break
+                case .throttled:
+                    // A rate limit: rest briefly, keep every conversation's home and its prompt cache.
+                    let rest = min(policy.throttleCap, max(1, retryAfter ?? policy.throttleDefault))
+                    let until = now.addingTimeInterval(rest)
+                    if state.openUntil.map({ $0 < until }) ?? true {
+                        state.openUntil = until
+                        state.openReason = "throttled"
+                    }
+                    events.append("账号 #\(worker) 被上游限流（429），暂停分配 \(Int(rest.rounded(.up))) 秒；会话保持原账号")
+                case .auth:
+                    state.openUntil = now.addingTimeInterval(policy.authConfirmCooldown)
+                    state.openReason = "auth"
+                    events.append("账号 #\(worker) 返回 \(status)，暂停 \(Int(policy.authConfirmCooldown)) 秒待确认；会话保持原账号")
                 case .hard:
                     state.failures += 1
                     state.openUntil = now.addingTimeInterval(policy.hardCooldown)
-                    events.append("账号 #\(worker) 返回 \(status)（额度、认证或封禁），熔断 \(Int(policy.hardCooldown / 60)) 分钟")
+                    state.openReason = status == 402 ? "quota" : "auth"
+                    let cause = status == 402 ? "额度已用尽" : "连续两次认证失败"
+                    events.append("账号 #\(worker) 返回 \(status)（\(cause)），熔断 \(Int(policy.hardCooldown / 60)) 分钟")
                     if bound, let session {
                         bindings[session] = nil
                         evictedFrom[session] = worker
@@ -273,6 +337,7 @@ final class KiroSessionRouter: @unchecked Sendable {
                     state.failures += 1
                     if state.failures >= policy.workerFailureThreshold, !(state.openUntil.map { $0 > now } ?? false) {
                         state.openUntil = now.addingTimeInterval(policy.cooldown)
+                        state.openReason = "failures"
                         events.append("账号 #\(worker) 连续失败 \(state.failures) 次（最近 \(status)），熔断 \(Int(policy.cooldown / 60)) 分钟")
                     }
                     if bound, let session, var binding = bindings[session] {
@@ -318,20 +383,50 @@ final class KiroSessionRouter: @unchecked Sendable {
                 for value in bindings.values where value.worker == id && now.timeIntervalSince(value.lastUsed) < policy.activeWindow {
                     active += 1
                 }
-                let open = state.openUntil.map { $0 > now } ?? false
+                let rest = state.openUntil.map { max(0, $0.timeIntervalSince(now)) } ?? 0
                 accounts.append(Snapshot.Account(id: id, inFlight: state.inFlight, sessions: active,
-                                                 consecutiveFailures: state.failures, circuitOpen: open))
+                                                 consecutiveFailures: state.failures, circuitOpen: rest > 0,
+                                                 restSeconds: Int(rest.rounded(.up)), restReason: rest > 0 ? state.openReason : ""))
             }
             return Snapshot(sessions: sessions, accounts: accounts)
         }
+    }
+
+    /// When every candidate is resting: seconds until the first one takes work again (at least 1).
+    /// nil while any candidate is available, so a client is never told to wait for nothing.
+    func retryAfter(candidates: [KiroWorkerRoute]) -> Int? {
+        let now = clock()
+        return lock.withLock { () -> Int? in
+            var soonest: TimeInterval?
+            for worker in candidates {
+                guard let until = health[worker.id]?.openUntil, until > now else { return nil }
+                let wait = until.timeIntervalSince(now)
+                soonest = min(soonest ?? wait, wait)
+            }
+            return soonest.map { max(1, Int($0.rounded(.up))) }
+        }
+    }
+
+    /// Ends an account's rest at once (the user chose "立即解除冷却"); its failure counts start over.
+    func clearRest(_ worker: String) {
+        let ended: Bool = lock.withLock {
+            guard var state = health[worker], state.openUntil != nil else { return false }
+            state.openUntil = nil; state.openReason = ""; state.failures = 0
+            state.authFailures = 0; state.lastAuthFailure = nil
+            health[worker] = state
+            return true
+        }
+        if ended { emit(["账号 #\(worker) 的冷却已手动解除"]) ; onStateChange?() }
     }
 
     private func isOpen(_ worker: String, _ now: Date) -> Bool {
         health[worker]?.openUntil.map { $0 > now } ?? false
     }
 
-    /// Fewest active conversations first, then fewest requests in flight; ties rotate.
-    private func leastLoaded(_ workers: [KiroWorkerRoute], now: Date) -> KiroWorkerRoute {
+    /// Fewest active conversations first, then fewest requests in flight; ties rotate. A temporary
+    /// placement (a retry, a standby turn, a request without a conversation) binds nothing, so it
+    /// weighs requests in flight first: a burst of failovers then spreads over the accounts.
+    private func leastLoaded(_ workers: [KiroWorkerRoute], now: Date, temporary: Bool = false) -> KiroWorkerRoute {
         var sessions: [String: Int] = [:]
         for binding in bindings.values where now.timeIntervalSince(binding.lastUsed) < policy.activeWindow {
             sessions[binding.worker, default: 0] += 1
@@ -340,9 +435,11 @@ final class KiroSessionRouter: @unchecked Sendable {
         let offset = rotation % workers.count
         let ordered = Array(workers[offset...] + workers[..<offset])
         return ordered.min { a, b in
-            let left = sessions[a.id] ?? 0, right = sessions[b.id] ?? 0
-            if left != right { return left < right }
-            return (health[a.id]?.inFlight ?? 0) < (health[b.id]?.inFlight ?? 0)
+            let load = (sessions[a.id] ?? 0, sessions[b.id] ?? 0)
+            let flight = (health[a.id]?.inFlight ?? 0, health[b.id]?.inFlight ?? 0)
+            let (first, second) = temporary ? (flight, load) : (load, flight)
+            if first.0 != first.1 { return first.0 < first.1 }
+            return second.0 < second.1
         }!
     }
 

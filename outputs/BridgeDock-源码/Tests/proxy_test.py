@@ -13,6 +13,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 seen = []
+# Pool credentials for the routing checks: which key served each request, and scripted failures.
+pool_seen = []
+pool_failures = {}
 direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
@@ -39,7 +42,11 @@ class MockProvider(BaseHTTPRequestHandler):
         if self.path != '/v1/chat/completions':
             self.send_json(404, {'error': {'message': 'Unexpected path'}})
             return
-        if self.headers.get('Authorization') != 'Bearer mock-upstream-key':
+        auth = self.headers.get('Authorization')
+        if body.get('model') in ('pool-model', 'slow-model'):
+            self.pool(body, auth)
+            return
+        if auth != 'Bearer mock-upstream-key':
             self.send_json(401, {'error': {'message': 'Wrong upstream key'}})
             return
         if body['model'] == 'second-model':
@@ -68,6 +75,34 @@ class MockProvider(BaseHTTPRequestHandler):
             self.send_json(200, {'id': 'chatcmpl-mock', 'object': 'chat.completion', 'created': 1730000000, 'model': 'upstream-model', 'choices': [{'index': 0, 'message': message, 'finish_reason': 'tool_calls' if tool else 'stop'}], 'usage': {'prompt_tokens': 5, 'completion_tokens': 2, 'total_tokens': 7}})
 
 
+    def pool(self, body, auth):
+        pool_seen.append((auth, body.get('stream', False)))
+        if auth not in ('Bearer pool-key-1', 'Bearer pool-key-2'):
+            self.send_json(401, {'error': {'message': 'Wrong pool key'}})
+            return
+        if pool_failures.get(auth, 0) > 0:
+            pool_failures[auth] -= 1
+            self.send_json(503, {'error': {'message': 'Simulated transient overload', 'type': 'server_error'}})
+            return
+        if not body.get('stream'):
+            self.send_json(200, {'id': 'chatcmpl-pool', 'object': 'chat.completion', 'created': 1730000000, 'model': body['model'], 'choices': [{'index': 0, 'message': {'role': 'assistant', 'content': 'OK'}, 'finish_reason': 'stop'}], 'usage': {'prompt_tokens': 5, 'completion_tokens': 1, 'total_tokens': 6}})
+            return
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/event-stream')
+        self.send_header('Connection', 'close')
+        self.end_headers()
+        for index, delta in enumerate([{'role': 'assistant'}, {'content': 'O'}, {'content': 'K'}]):
+            if body['model'] == 'slow-model' and index == 1:
+                time.sleep(2.6)  # a long silence after the first event, like extended thinking
+            chunk = {'id': 'chatcmpl-pool', 'object': 'chat.completion.chunk', 'created': 1730000000, 'model': body['model'], 'choices': [{'index': 0, 'delta': delta, 'finish_reason': None}]}
+            self.wfile.write(('data: ' + json.dumps(chunk) + '\n\n').encode())
+            self.wfile.flush()
+        final = {'id': 'chatcmpl-pool', 'object': 'chat.completion.chunk', 'created': 1730000000, 'model': body['model'], 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]}
+        self.wfile.write(('data: ' + json.dumps(final) + '\n\ndata: [DONE]\n\n').encode())
+        self.wfile.flush()
+        self.close_connection = True
+
+
 def call(path, body=None, key='local-test-key', method=None):
     request = urllib.request.Request('http://127.0.0.1:19417' + path,
                                      data=json.dumps(body).encode() if body is not None else None,
@@ -93,10 +128,24 @@ def main():
     plugin = scratch / 'plugins/darwin/arm64'
     plugin.mkdir(parents=True, exist_ok=True)
     (scratch / 'accounts').mkdir(exist_ok=True)
+    (scratch / 'accounts/kiro-offline.json').write_text(json.dumps({
+        'type': 'kiro', 'disabled': True, 'email': 'offline@example.invalid', 'auth_method': 'social',
+        'refresh_token': 'placeholder', 'access_token': 'placeholder'}))
     shutil.copy2(root / 'Vendor/kiro.dylib', plugin / 'kiro.dylib')
     config = json.loads((scratch / 'config.yaml').read_text())
     config['oauth']['auth-dir'] = str(scratch / 'accounts')
     config['plugins']['dir'] = str(scratch / 'plugins')
+    # Two credentials of one provider, so the generated routing (session affinity, failover) has a choice.
+    config['api-keys']['openai-compatibility'].append({
+        'name': 'Pool', 'prefix': 'pool', 'base-url': 'http://127.0.0.1:19419/v1',
+        'keys': [{'api-key': 'pool-key-1'}, {'api-key': 'pool-key-2'}],
+        'models': [{'name': 'pool-model', 'alias': 'pool-model'}, {'name': 'slow-model', 'alias': 'slow-model'}]})
+    generated_routing = json.loads(json.dumps(config['routing']))
+    generated_streaming = dict(config['requests']['streaming'])
+    # Same streaming behaviour as generated, with a 1 s heartbeat so the check runs quickly.
+    config['requests']['streaming']['keepalive-seconds'] = 1
+    # And a 2 s transient-error rest instead of 15 s, for the same reason.
+    config['routing']['cooldown']['transient-error-cooldown-seconds'] = 2
     (scratch / 'config.yaml').write_text(json.dumps(config))
     output = open(scratch / 'core-test.log', 'w')
     core = subprocess.Popen([str(root / 'Vendor/cli-proxy-api'), '-config', str(scratch / 'config.yaml'), '-local-model'], cwd=scratch, stdout=output, stderr=output)
@@ -168,6 +217,71 @@ def main():
         check(status >= 400, 'unknown model fails explicitly')
         status, text = call('/v1/chat/completions', dict(chat, model='mock/second-model'))
         check(status == 429, 'upstream rate-limit status propagated')
+        # Generated routing: one conversation stays on one credential (prompt cache), new ones spread out.
+        check(generated_routing.get('session-affinity') is True and generated_routing.get('session-affinity-rebind-on') == 'quota'
+              and generated_streaming == {'keepalive-seconds': 15, 'bootstrap-retries': 1}, 'generated routing and streaming settings')
+        conversation = [{'role': 'system', 'content': 'You are a pool test.'}, {'role': 'user', 'content': 'Conversation one'}]
+        pool_seen.clear()
+        for turn in range(6):
+            turns = conversation + [{'role': 'assistant', 'content': 'OK'}, {'role': 'user', 'content': 'turn %d' % turn}] if turn else conversation
+            status, _ = call('/v1/chat/completions', {'model': 'pool/pool-model', 'messages': turns})
+            assert status == 200, status
+        home = pool_seen[0][0]
+        check(len(pool_seen) == 6 and all(auth == home for auth, _ in pool_seen), 'every turn of one conversation stays on one credential')
+        pool_seen.clear()
+        separate = {}
+        for n in range(6):
+            status, _ = call('/v1/chat/completions', {'model': 'pool/pool-model', 'messages': [{'role': 'user', 'content': 'Separate conversation %d' % n}]})
+            assert status == 200, status
+            separate[n] = pool_seen[-1][0]
+        check(set(separate.values()) == {'Bearer pool-key-1', 'Bearer pool-key-2'}, 'new conversations are spread over both credentials')
+        neighbour = next(n for n, auth in separate.items() if auth == home)
+
+        def turn(messages, text, stream=False):
+            pool_seen.clear()
+            history = messages + [{'role': 'assistant', 'content': 'OK'}, {'role': 'user', 'content': text}]
+            status, body = call('/v1/chat/completions', {'model': 'pool/pool-model', 'messages': history, 'stream': stream})
+            return status, body, [auth for auth, _ in pool_seen]
+
+        # A transient 5xx before any output: that request fails over silently.
+        pool_failures[home] = 1
+        status, text, served = turn(conversation, 'after overload', stream=True)
+        check(status == 200 and '[DONE]' in text and 'error' not in text, 'a stream failing before its first byte is retried silently')
+        check(len(served) >= 2 and served[0] == home and served[-1] != home, 'the retry is served by the other credential')
+        rescuer = served[-1]
+        # The cooldown is persisted next to the accounts, and BridgeDock's "立即解除冷却" clears it.
+        def pool_cooldowns():
+            found = {}
+            for path in (scratch / 'accounts').glob('*.cds'):
+                document = json.loads(path.read_text())
+                if 'pool' in document.get('auth_id', ''):
+                    found[document['auth_id']] = [r for r in document.get('records', []) if r.get('status') == 'cooling']
+            return found
+        cooling = {key: value for key, value in pool_cooldowns().items() if value}
+        check(len(cooling) == 1 and all(r.get('next_retry_after') and r.get('last_error', {}).get('http_status') == 503
+                                        for r in next(iter(cooling.values()))),
+              'the failed credential\'s cooldown is saved with its end time and cause')
+        # "立即解除冷却" resets a subscription account by its auth index. The account here is disabled,
+        # so the core never contacts Kiro with its placeholder token.
+        status, text = call('/v8/management/credentials', key='management-test-key')
+        offline = [r for r in json.loads(text).get('files', []) if r.get('name') == 'kiro-offline.json']
+        check(status == 200 and len(offline) == 1 and offline[0].get('auth_index'), 'subscription accounts are listed with the auth index the reset needs')
+        status, text = call('/v8/management/routing/cooldown/reset', {'auth_index': offline[0]['auth_index']}, key='management-test-key', method='POST')
+        check(status == 200 and json.loads(text).get('status') == 'ok', 'the core accepts a cooldown reset for an account')
+        status, _ = call('/v8/management/routing/cooldown/reset', {'auth_index': 'ffffffffffffffff'}, key='management-test-key', method='POST')
+        check(status == 404, 'a reset for an unknown account is refused')
+        # The conversation continues where its context was last sent, without bouncing back and forth.
+        followups = [turn(conversation, 'next turn %d' % n)[2] for n in range(3)]
+        check(all(s and s[-1] == rescuer for s in followups), 'after a failover the conversation stays on one credential')
+        # Other conversations on the resting credential are not dragged along once its short rest is over.
+        time.sleep(2.5)
+        status, _, served = turn([{'role': 'user', 'content': 'Separate conversation %d' % neighbour}], 'follow-up')
+        check(status == 200 and served == [home], 'a transient error does not move the credential\'s other conversations')
+        # A long silence mid-stream is bridged by SSE comment heartbeats; the content still arrives intact.
+        status, text = call('/v1/chat/completions', {'model': 'pool/slow-model', 'messages': [{'role': 'user', 'content': 'think slowly'}], 'stream': True})
+        lines = text.splitlines()
+        check(status == 200 and any(line.startswith(':') for line in lines), 'heartbeats are sent during a silent stretch')
+        check('[DONE]' in text and text.count('chat.completion.chunk') >= 4, 'the slow stream is delivered complete')
         config['api-keys']['openai-compatibility'][0]['models'][0]['alias'] = 'renamed'
         status, _ = call('/v8/management/config.yaml', config, key='management-test-key', method='PUT')
         check(status == 200, 'live configuration write accepted')

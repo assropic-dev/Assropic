@@ -41,6 +41,8 @@ class Core(BaseHTTPRequestHandler):
             self.send_header('Content-Length', str(len(data))); self.end_headers(); self.wfile.write(data)
 
 kiro_seen = []
+# Scripted 429s for the healthy Kiro worker: each entry is answered once, with that Retry-After.
+kiro_throttle = []
 
 class Kiro(BaseHTTPRequestHandler):
     """Stands in for kiro2cc-proxy: streams Anthropic events with a pause between them."""
@@ -49,6 +51,12 @@ class Kiro(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         kiro_seen.append((self.path, body, dict(self.headers)))
+        if kiro_throttle:
+            data = b'{"error":{"type":"rate_limit_error","message":"Upstream rate limit reached on all accounts."}}'
+            self.send_response(429); self.send_header('Content-Type', 'application/json')
+            self.send_header('Retry-After', str(kiro_throttle.pop(0)))
+            self.send_header('Content-Length', str(len(data))); self.end_headers(); self.wfile.write(data)
+            return
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream')
         self.send_header('Connection', 'close')
@@ -196,6 +204,17 @@ try:
     status, _ = call('/v1/chat/completions', {'model': unprefixed, 'messages': []})
     check(status == 200 and kiro_seen[-1][0] == '/v1/chat/completions' and kiro_seen[-1][1]['model'] == 'claude-sonnet-5.5'
           and kiro_seen[-1][2].get('Authorization') == 'Bearer kiro-default-key', 'unprefixed Kiro model uses the default runtime key')
+    # The unprefixed model has a single account: its 429 reaches the client as a 429 with Retry-After.
+    kiro_throttle[:] = [9]
+    status, body = call('/v1/chat/completions', {'model': unprefixed, 'messages': [{'role': 'user', 'content': 'rate limited'}]})
+    check(status == 429 and last_headers.get('retry-after') == '9' and b'rate_limit_error' in body,
+          'a Kiro rate limit with no other account left reaches the client as 429 with its Retry-After')
+    kiro_throttle[:] = [1]
+    status, _ = call('/v1/chat/completions', {'model': unprefixed, 'messages': [{'role': 'user', 'content': 'rate limited'}]})
+    check(status == 429 and last_headers.get('retry-after') in ('8', '9'),
+          'while every account of the model rests, the client is told to wait for the soonest one, not the upstream\'s 1 s')
+    status, _ = call('/v1/chat/completions', {'model': unprefixed, 'messages': [{'role': 'user', 'content': 'recovered'}]})
+    check(status == 200 and 'retry-after' not in last_headers, 'a resting single account is still tried, and a success needs no Retry-After')
     kiro_count = len(kiro_seen)
     status, _ = call('/v1/embeddings', {'model': pooled, 'input': 'x'}, headers=native_headers({'provider': kiro_provider}))
     check(status == 200 and len(kiro_seen) == kiro_count and seen[-1][1]['model'] == 'kiro/claude-opus-5.5',

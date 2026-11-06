@@ -434,6 +434,8 @@ private final class GatewayClient: NSObject, URLSessionDataDelegate, @unchecked 
         var tried: Set<String> = []
         var current: KiroWorkerRoute?
         var status: Int?
+        /// The upstream's Retry-After for the response being relayed.
+        var retryAfter: TimeInterval?
     }
     private var kiroAttempt: KiroAttempt?
     private let router: KiroSessionRouter?
@@ -606,6 +608,7 @@ private final class GatewayClient: NSObject, URLSessionDataDelegate, @unchecked 
         attempt.current = choice.worker
         attempt.tried.insert(choice.worker.id)
         attempt.status = nil
+        attempt.retryAfter = nil
         kiroAttempt = attempt
         router.begin(choice.worker.id)
         resolutionHeaders["X-BridgeDock-Kiro-Account"] = choice.worker.id
@@ -707,13 +710,14 @@ private final class GatewayClient: NSObject, URLSessionDataDelegate, @unchecked 
             guard !self.closed, dataTask === self.task else { return .stale }
             return self.shouldRetryKiro(status: http.statusCode) ? .retry : .relay
         }
+        let upstreamRetryAfter = KiroSessionRouter.retryAfter(http.value(forHTTPHeaderField: "Retry-After"))
         switch disposition {
         case .stale: completionHandler(.cancel); return
         case .retry:
             completionHandler(.cancel)
             queue.async { [self] in
                 guard !self.closed, dataTask === self.task else { return }
-                self.retryKiro(after: .failure(status: http.statusCode))
+                self.retryKiro(after: .failure(status: http.statusCode, retryAfter: upstreamRetryAfter))
             }
             return
         case .relay: break
@@ -722,11 +726,24 @@ private final class GatewayClient: NSObject, URLSessionDataDelegate, @unchecked 
             guard !self.closed, dataTask === self.task else { return }
             self.responseStarted = true
             self.kiroAttempt?.status = http.statusCode
+            self.kiroAttempt?.retryAfter = upstreamRetryAfter
+            // A Kiro error that no other account could take over: record it now, so the client's
+            // Retry-After can cover every account of the model, this one included.
+            var retryAfter: Int?
+            if http.statusCode >= 400, let attempt = self.kiroAttempt, attempt.current != nil {
+                self.kiroFinish(.failure(status: http.statusCode, retryAfter: upstreamRetryAfter))
+                if [429, 503].contains(http.statusCode), let wait = self.router?.retryAfter(candidates: attempt.workers),
+                   Double(wait) > (upstreamRetryAfter ?? 0) {
+                    retryAfter = wait
+                }
+            }
             var text = "HTTP/1.1 \(http.statusCode) \(HTTPURLResponse.localizedString(forStatusCode: http.statusCode))\r\n"
             for (key, value) in http.allHeaderFields {
                 guard let key = key as? String, !Self.hopHeaders.contains(key.lowercased()), !key.lowercased().hasPrefix("access-control-") else { continue }
+                if retryAfter != nil, key.lowercased() == "retry-after" { continue }
                 text += key + ": " + String(describing: value) + "\r\n"
             }
+            if let retryAfter { text += "Retry-After: \(retryAfter)\r\n" }
             for (key, value) in self.resolutionHeaders.sorted(by: { $0.key < $1.key }) { text += key + ": " + value + "\r\n" }
             text += "Transfer-Encoding: chunked\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n"
             self.send(Data(text.utf8))
@@ -776,7 +793,8 @@ private final class GatewayClient: NSObject, URLSessionDataDelegate, @unchecked 
                 self.finish(); return
             }
             let status = self.kiroAttempt?.status ?? 200
-            self.kiroFinish((200..<400).contains(status) ? .success : .failure(status: status))
+            self.kiroFinish((200..<400).contains(status) ? .success
+                            : .failure(status: status, retryAfter: self.kiroAttempt?.retryAfter))
             self.connection.send(content: Data("0\r\n\r\n".utf8), completion: .contentProcessed { [weak self] _ in self?.finish() })
         }
     }

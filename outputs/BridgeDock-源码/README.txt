@@ -1,4 +1,4 @@
-BridgeDock 桥接台 1.4.20
+BridgeDock 桥接台 1.4.21
 
 面向 Apple Silicon Mac 的本地模型反代桌面应用。
 界面使用 SwiftUI，内置 CLIProxyAPI 8.0.53、Kiro Plugin 0.1.1 与 kiro2cc-proxy 3.5.1。
@@ -41,7 +41,9 @@ BridgeDock 桥接台 1.4.20
    模型列表每行一个，也可以写成“上游模型ID = 别名”。对外调用名为“渠道名称前四字/别名”。
 3. 订阅账号使用浏览器完成授权。密码、二次验证和授权由账号持有人操作。
    已在官方客户端登录的 Claude、GPT / Codex、Kiro，可以点击“自动读取本机登录”，一次扫描并接入所有已发现账号；也可以在服务商卡片中单独连接。
-   Claude 读取 macOS 钥匙串或 .claude/.credentials.json；GPT 读取 .codex/auth.json；
+   Claude Code 读取 macOS 钥匙串或 .claude/.credentials.json；设置了
+   CLAUDE_CONFIG_DIR / CLAUDE_SECURESTORAGE_CONFIG_DIR 时也会查找对应的分身钥匙串；
+   Claude Desktop 运行时会从已启动的内置 Code 会话读取本机 OAuth 登录；GPT 读取 .codex/auth.json；
    Kiro 读取 .aws/sso/cache/kiro-auth-token.json 及对应客户端注册文件。
    Kimi Code、Grok、Cursor 和 ZCode 也提供“读取本机订阅”入口，会按各自客户端的
    credentials/auth/config 文件（Kimi Code 登录 token 会按 config.toml 中的 OAuth 引用读取
@@ -528,6 +530,34 @@ Grok Build → xAI，OpenCode 等 → Chat Completions）。链接不带模型�
 只支持服务商链接，Gemini 原生协议、MCP、提示词和技能链接会提示原因，不会导入。
 
 xcrun swiftc -swift-version 5 Sources/Models.swift Sources/SubscriptionAccounts.swift Sources/Quotas.swift Sources/CCSwitchLink.swift Tests/CCSwitchLinkTests.swift -o /tmp/bridgedock-ccswitch-tests && /tmp/bridgedock-ccswitch-tests
+
+
+会话粘性、限流与冷却（1.4.21）
+
+同一个对话固定使用同一个账号或同一把 Key，上游的提示词缓存可以持续命中，省额度、首字更快。
+内核按 Claude Code / Codex / OpenCode 的会话标识、prompt_cache_key 或首条消息识别对话；
+子代理跟随父对话的账号。新对话仍在账号之间轮流分配。
+• 临时错误（408、5xx、空响应）只让这一次请求换号，账号休息 15 秒（内核默认 60 秒），
+  同一账号上的其他对话不会被一起挪走。额度和认证错误才让对话换到别的账号。
+• 流式响应在长时间思考时每 15 秒发送 SSE 心跳；还没输出任何内容前失败，会静默重试一次。
+• Claude / Codex 某个模型的额度用完时，只冷却这个模型，账号的其他模型照常可用。
+• 每个 Claude 账号固定一套设备画像（系统、架构、客户端版本基线），日期按本机时区。
+  指纹基线随内核版本更新，内核保持较新版本可以与真实客户端保持一致。
+• 冷却状态保存在 accounts 目录（*.cds），重启后不会立刻再请求刚被限流的账号。
+
+Kiro 账号池同样按这些原则切换：
+• 429 是限流，不是额度用完（kiro2cc 已在内部退避，额度用完会返回 402）。账号按 Retry-After
+  休息（最长 60 秒，未给出时 5 秒），期间对话的单轮请求由其他账号临时接手，结束后回到原账号，
+  不计入连续失败。
+• 401 / 403 先休息 30 秒待确认，10 分钟内再出现一次才按认证失败处理（熔断 10 分钟并改派对话）。
+  进程刚重启时短暂拒绝密钥，不会再被误判为账号失效。
+• 临时接手的请求按进行中的请求数分配，多个请求同时换号时会分散到不同账号。
+• 一个模型的所有账号都在休息时，返回 429 并在 Retry-After 写明最早恢复的秒数。
+
+“账号与渠道”页的订阅账号在冷却时显示原因和倒计时，例如“冷却中 · 上游限流 · 约 2 分 5 秒后恢复”；
+只冷却部分模型时会列出模型名。账号菜单的“立即解除冷却”可以马上恢复分配。
+
+xcrun swiftc -swift-version 5 Sources/AccountRest.swift Sources/KiroRouting.swift Tests/AccountRestTests.swift -o /tmp/bridgedock-rest-tests && /tmp/bridgedock-rest-tests
 
 
 模型系列分组（1.4.19）

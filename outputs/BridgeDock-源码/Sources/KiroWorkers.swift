@@ -102,6 +102,9 @@ final class KiroWorkerPool {
         accountsDirectory = dataDirectory.appendingPathComponent("accounts")
     }
 
+    /// Worker slot of every running account, by account file name; the router knows accounts by slot.
+    var accountSlots: [String: Int] { details.mapValues(\.slot) }
+
     /// The ports in use, slot by slot; for diagnostics.
     var ports: [String: Int] { workers.mapValues(\.port) }
 

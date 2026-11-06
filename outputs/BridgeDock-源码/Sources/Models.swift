@@ -930,6 +930,40 @@ struct AppSettings: Codable {
     /// 把中转站“导入 CC Switch”按钮发出的 ccswitch:// 链接交给 BridgeDock 打开。
     var handlesImportLinks = true
 
+    /// Account selection in the core when several credentials serve one model.
+    /// - Session affinity keeps a conversation (Claude Code / Codex / OpenCode session headers,
+    ///   `prompt_cache_key`, or the first-message hash) on one credential, so the upstream prompt
+    ///   cache keeps hitting; sub-agents follow their parent's credential.
+    /// - `rebind-on: quota`: a transient error (408, 5xx, empty stream) fails that one request over and
+    ///   keeps the binding; only quota and auth errors (429, 401/402/403, invalid_grant) move the session.
+    /// - Cooldown state survives a core restart, so a rate-limited credential is not hit again right away.
+    /// - A transient error (408/5xx) rests the credential 15 s instead of the core's default 60 s. While a
+    ///   credential rests, every conversation on it fails over, and the core then keeps each one on the
+    ///   credential that served it, so a long rest after a single 503 would scatter all of them and
+    ///   throw away their prompt caches. Quota and auth cooldowns are unchanged.
+    static let coreRouting: [String: Any] = [
+        "strategy": "round-robin", "force-model-prefix": true,
+        "session-affinity": true, "session-affinity-ttl": "1h",
+        "session-affinity-subagents": true, "session-affinity-rebind-on": "quota",
+        "retry": ["request-retry": 1],
+        "cooldown": ["save-cooldown-status": true, "transient-error-cooldown-seconds": 15]
+    ]
+
+    /// SSE comment heartbeats during long silences (for example extended thinking), and one silent retry
+    /// when a stream fails before its first byte. Heartbeats wait for the first token: sending them
+    /// earlier would commit a 200 and turn a failover-able upstream error into an in-stream error.
+    static let coreStreaming: [String: Any] = ["keepalive-seconds": 15, "bootstrap-retries": 1]
+
+    /// Codex / Claude: a quota cap on one model (for example a per-model weekly limit) cools only that
+    /// model, and the credential keeps serving its other models.
+    /// Claude: every credential keeps one stable device profile (OS, arch, client baseline) instead of
+    /// drifting between requests; the cloaked date uses this Mac's time zone, as Claude Code here would.
+    static func coreUpstream(timeZone: String) -> [String: Any] {
+        ["codex": ["model-level-cooling": true],
+         "claude": ["model-level-cooling": true,
+                    "header-defaults": ["stabilize-device-profile": true, "timezone": timeZone]]]
+    }
+
     func coreConfig(dataDirectory: URL, pluginDirectory: URL) -> [String: Any] {
         var providers: [String: Any] = [:]
         var plugins: [String: Any] = [
@@ -948,8 +982,10 @@ struct AppSettings: Codable {
             "access": ["api-keys": [coreClientKey]],
             "api-keys": providers,
             "oauth": ["auth-dir": dataDirectory.appendingPathComponent("accounts").path],
-            "routing": ["strategy": "round-robin", "force-model-prefix": true, "retry": ["request-retry": 1]],
-            "requests": ["proxy-url": proxyURL, "tls-handshake-timeout-seconds": 20],
+            "routing": Self.coreRouting,
+            "requests": ["proxy-url": proxyURL, "tls-handshake-timeout-seconds": 20,
+                         "streaming": Self.coreStreaming],
+            "upstream": Self.coreUpstream(timeZone: TimeZone.current.identifier),
             // The core otherwise injects a hidden image_generation tool into chat requests; clients such as
             // Cursor ignore the returned images and treat the turn as empty. /v1/images/* stays enabled.
             "multimedia": ["disable-image-generation": "chat"],
@@ -1032,6 +1068,8 @@ struct Account: Identifiable {
     let runtimeProfile: String
     let managedByBridgeDock: Bool
     let credentialOrigin: String
+    /// The core's id for this credential; its cooldown file names it this way.
+    let credentialID: String
     var loginProvider: String { oauthProvider.isEmpty ? provider : oauthProvider }
     var providerTitle: String {
         if provider == CursorAccountProfile.providerID {
@@ -1053,6 +1091,7 @@ struct Account: Identifiable {
     var id: String { name }
     init(_ value: [String: Any]) {
         name = value["name"] as? String ?? value["id"] as? String ?? "unknown"
+        credentialID = value["id"] as? String ?? name
         provider = value["provider"] as? String ?? value["type"] as? String ?? "unknown"
         email = value["email"] as? String ?? value["label"] as? String ?? name
         status = value["status"] as? String ?? "unknown"

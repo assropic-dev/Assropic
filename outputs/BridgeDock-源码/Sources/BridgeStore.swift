@@ -21,6 +21,8 @@ final class BridgeStore: ObservableObject {
     var capabilityBackfillAttempted: Set<String> = []
     private let modelGateway = ModelGateway()
     @Published var accounts: [Account] = []
+    /// Accounts that take no new requests right now, by account id: why, and until when.
+    @Published var accountRests: [String: AccountRest] = [:]
     @Published var activities: [Activity] = []
     @Published var login: LoginSession?
     @Published var loginStatus = ""
@@ -452,6 +454,7 @@ final class BridgeStore: ObservableObject {
             }
             accounts = rows.map(Account.init)
                 .filter { !["api-key", "apikey"].contains($0.provider) }
+            await updateAccountRests()
             // Plugin vendors register their definitions after startup; retry missing sets.
             let definitionKey = Set(accounts.map(\.provider) + modelOwners).sorted().joined(separator: ",")
             let incomplete = !Self.expectedDefinitionSets(accounts, owners: modelOwners).isSubset(of: Set(modelDefinitions.keys))
@@ -911,6 +914,36 @@ final class BridgeStore: ObservableObject {
             record("已刷新账号凭据 · " + account.email)
         } catch { report(error) }
         await refresh()
+    }
+
+    /// Reads which accounts are cooling down: the core's persisted cooldowns and the Kiro router's rests.
+    func updateAccountRests() async {
+        let directory = dataDirectory.appendingPathComponent("accounts")
+        let core = await Task.detached(priority: .utility) { AccountRestReader.coreRests(directory: directory) }.value
+        let kiro = AccountRestReader.kiroRests(modelGateway.kiroRouter.snapshot(), slots: kiroRuntime.accountSlots)
+        var rests: [String: AccountRest] = [:]
+        for account in accounts {
+            rests[account.id] = AccountRestReader.rest(for: (account.credentialID, account.name), core: core, kiro: kiro)
+        }
+        if rests != accountRests { accountRests = rests }
+    }
+
+    /// Lets a cooling account take requests again right away.
+    func endRest(_ account: Account) async {
+        guard running, accountOperation == nil, let rest = accountRests[account.id] else { return }
+        accountOperation = account.id
+        defer { accountOperation = nil }
+        do {
+            if rest.source == "kiro", let slot = kiroRuntime.accountSlots[account.name] {
+                modelGateway.kiroRouter.clearRest(String(slot))
+            } else {
+                guard !account.authIndex.isEmpty else { throw BridgeError.message("这个账号缺少内核索引，无法解除冷却。") }
+                _ = try await object("/v8/management/routing/cooldown/reset", method: "POST", value: ["auth_index": account.authIndex])
+            }
+            record("已解除冷却 · " + account.displayName)
+        } catch { report(error) }
+        accountRests[account.id] = nil
+        await updateAccountRests()
     }
 
     func toggleAccount(_ account: Account) async {

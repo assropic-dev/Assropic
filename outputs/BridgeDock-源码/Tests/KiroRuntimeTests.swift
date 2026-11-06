@@ -146,14 +146,14 @@ struct KiroRuntimeTests {
         check(firstChat.reason == "new" && secondChat.reason == "new" && firstChat.worker != secondChat.worker, "two new conversations go to two different accounts")
         check((0..<5).allSatisfy { _ in router.select(session: "A", candidates: pair) == KiroSessionRouter.Choice(worker: firstChat.worker, reason: "sticky") },
               "a conversation stays on its account")
-        router.begin(firstChat.worker.id); router.finish(firstChat.worker.id, session: "A", outcome: .failure(status: 429))
+        router.begin(firstChat.worker.id); router.finish(firstChat.worker.id, session: "A", outcome: .failure(status: 502))
         router.begin(firstChat.worker.id); router.finish(firstChat.worker.id, session: "A", outcome: .failure(status: 503))
         check(router.account(of: "A") == firstChat.worker.id, "two failures in a row do not move a conversation")
         router.begin(firstChat.worker.id); router.finish(firstChat.worker.id, session: "A", outcome: .success)
-        router.begin(firstChat.worker.id); router.finish(firstChat.worker.id, session: "A", outcome: .failure(status: 429))
-        router.begin(firstChat.worker.id); router.finish(firstChat.worker.id, session: "A", outcome: .failure(status: 429))
+        router.begin(firstChat.worker.id); router.finish(firstChat.worker.id, session: "A", outcome: .failure(status: 502))
+        router.begin(firstChat.worker.id); router.finish(firstChat.worker.id, session: "A", outcome: .failure(status: 502))
         check(router.account(of: "A") == firstChat.worker.id, "a success in between starts the count again")
-        router.begin(firstChat.worker.id); router.finish(firstChat.worker.id, session: "A", outcome: .failure(status: 429))
+        router.begin(firstChat.worker.id); router.finish(firstChat.worker.id, session: "A", outcome: .failure(status: 502))
         check(router.account(of: "A") == nil, "the third failure in a row releases the conversation")
         let moved = router.select(session: "A", candidates: pair)!
         check(moved.worker != firstChat.worker && router.account(of: "A") == moved.worker.id,
@@ -224,8 +224,93 @@ struct KiroRuntimeTests {
         check(retry.account(of: "F") == nil, "a conversation idle for six hours is forgotten")
         check((try? JSONEncoder().encode(retry.snapshot())) != nil, "the snapshot encodes for router-state.json")
         check(KiroSessionRouter.retriesElsewhere(status: 429) && KiroSessionRouter.retriesElsewhere(status: 402)
+              && KiroSessionRouter.retriesElsewhere(status: 401) && KiroSessionRouter.retriesElsewhere(status: 503)
               && !KiroSessionRouter.retriesElsewhere(status: 400) && !KiroSessionRouter.retriesElsewhere(status: 200),
               "only account-side errors are retried on another account")
+
+        // 429 is a rate limit: the account rests for its Retry-After, conversations keep their home.
+        let throttle = KiroSessionRouter(clock: { now })
+        var throttleEvents: [String] = []
+        throttle.onEvent = { throttleEvents.append($0) }
+        let t = throttle.select(session: "T", candidates: pair)!
+        for _ in 0..<6 { throttle.begin(t.worker.id); throttle.finish(t.worker.id, session: "T", outcome: .failure(status: 429, retryAfter: 5)) }
+        check(throttle.account(of: "T") == t.worker.id, "rate limits never move a conversation, however many")
+        check(throttle.snapshot().accounts.first { $0.id == t.worker.id }?.consecutiveFailures == 0,
+              "rate limits do not count toward the failure circuit")
+        let resting = throttle.snapshot().accounts.first { $0.id == t.worker.id }
+        check(resting?.circuitOpen == true && resting?.restSeconds == 5 && resting?.restReason == "throttled",
+              "the account rests for the upstream's Retry-After and the snapshot shows why and how long")
+        let duringRest = throttle.select(session: "T", candidates: pair)!
+        check(duringRest.reason == "standby" && duringRest.worker != t.worker, "while it rests a turn is served elsewhere")
+        check(throttle.select(session: "T2", candidates: pair)?.worker != t.worker, "a resting account takes no new conversations")
+        check(throttleEvents.contains { $0.contains("429") && $0.contains("会话保持原账号") }, "the rate limit is written to the router log")
+        now = now.addingTimeInterval(6)
+        check(throttle.select(session: "T", candidates: pair) == KiroSessionRouter.Choice(worker: t.worker, reason: "sticky"),
+              "after the rest the conversation is back on its own account")
+        throttle.finish(t.worker.id, session: "T", outcome: .failure(status: 429, retryAfter: 3600))
+        check(throttle.snapshot().accounts.first { $0.id == t.worker.id }?.restSeconds == 60, "a Retry-After longer than a minute is capped")
+        now = now.addingTimeInterval(61)
+        throttle.finish(t.worker.id, session: "T", outcome: .failure(status: 429))
+        check(throttle.snapshot().accounts.first { $0.id == t.worker.id }?.restSeconds == 5, "without a Retry-After the rest is five seconds")
+        throttle.finish(t.worker.id, session: "T", outcome: .failure(status: 402))
+        throttle.finish(t.worker.id, session: nil, outcome: .failure(status: 429, retryAfter: 1))
+        let quotaRest = throttle.snapshot().accounts.first { $0.id == t.worker.id }
+        check(quotaRest?.restReason == "quota" && (quotaRest?.restSeconds ?? 0) > 500, "a short rate-limit rest never shortens a quota rest")
+
+        // 401/403 is confirmed by a second one before the account is treated as broken.
+        let auth = KiroSessionRouter(clock: { now })
+        let ua = auth.select(session: "U", candidates: pair)!
+        auth.finish(ua.worker.id, session: "U", outcome: .failure(status: 401))
+        let firstAuth = auth.snapshot().accounts.first { $0.id == ua.worker.id }
+        check(auth.account(of: "U") == ua.worker.id && firstAuth?.restReason == "auth" && firstAuth?.restSeconds == 30,
+              "a first 401 rests the account for 30 seconds and keeps its conversations")
+        now = now.addingTimeInterval(31)
+        auth.finish(ua.worker.id, session: "U", outcome: .success)
+        auth.finish(ua.worker.id, session: "U", outcome: .failure(status: 403))
+        check(auth.account(of: "U") == ua.worker.id, "a success in between clears the first rejection")
+        auth.finish(ua.worker.id, session: "U", outcome: .failure(status: 403))
+        let confirmed = auth.snapshot().accounts.first { $0.id == ua.worker.id }
+        check(auth.account(of: "U") == nil && confirmed?.restReason == "auth" && (confirmed?.restSeconds ?? 0) == 600,
+              "a second rejection in a row releases the conversation and rests the account ten minutes")
+        let spaced = KiroSessionRouter(clock: { now })
+        let ub = spaced.select(session: "V", candidates: pair)!
+        spaced.finish(ub.worker.id, session: "V", outcome: .failure(status: 401))
+        now = now.addingTimeInterval(11 * 60)
+        spaced.finish(ub.worker.id, session: "V", outcome: .failure(status: 401))
+        check(spaced.account(of: "V") == ub.worker.id, "rejections more than ten minutes apart are not confirmed")
+
+        // Retry-After for the client: only when every account of the model is resting.
+        let wait = KiroSessionRouter(clock: { now })
+        check(wait.retryAfter(candidates: pair) == nil, "no Retry-After while an account is available")
+        wait.finish("1", session: nil, outcome: .failure(status: 429, retryAfter: 8))
+        check(wait.retryAfter(candidates: pair) == nil, "one resting account still leaves another available")
+        wait.finish("2", session: nil, outcome: .failure(status: 429, retryAfter: 3))
+        check(wait.retryAfter(candidates: pair) == 3, "with every account resting the client waits for the soonest one")
+        check(KiroSessionRouter.retryAfter("12") == 12 && KiroSessionRouter.retryAfter(" 0 ") == 0
+              && KiroSessionRouter.retryAfter("-1") == nil && KiroSessionRouter.retryAfter("soon") == nil && KiroSessionRouter.retryAfter(nil) == nil,
+              "Retry-After seconds are parsed and junk is ignored")
+        let httpDate = KiroSessionRouter.retryAfter("Wed, 21 Oct 2015 07:28:30 GMT", now: Date(timeIntervalSince1970: 1445412480))
+        check(httpDate == 30, "an HTTP-date Retry-After becomes seconds from now")
+
+        // A burst of failovers spreads by requests in flight instead of piling onto one account.
+        let herd = KiroSessionRouter(clock: { now })
+        let h3 = KiroWorkerRoute(id: "3", port: 18433, key: "k3", prefix: "kiro", pooled: true)
+        let trio = [w1, w2, h3]
+        _ = herd.select(session: "H1", candidates: trio); _ = herd.select(session: "H2", candidates: trio); _ = herd.select(session: "H3", candidates: trio)
+        let homeOfH1 = herd.account(of: "H1")!
+        // One of the other accounts holds four more conversations: by conversation count alone every
+        // standby turn would land on the quieter one.
+        let busy = trio.first { $0.id != homeOfH1 }!
+        for n in 4...7 { _ = herd.select(session: "H\(n)", candidates: [busy]) }
+        herd.finish(homeOfH1, session: nil, outcome: .failure(status: 429, retryAfter: 30))
+        var placed: [String: Int] = [:]
+        for _ in 0..<6 {
+            let choice = herd.select(session: "H1", candidates: trio)!
+            herd.begin(choice.worker.id)
+            placed[choice.worker.id, default: 0] += 1
+        }
+        check(placed[homeOfH1] == nil && placed.count == 2 && placed.values.allSatisfy { $0 == 3 },
+              "six standby turns at once are split evenly over the other accounts")
 
         // Slots fix each account's worker folder and port.
         var slots: [String: Int] = [:]
