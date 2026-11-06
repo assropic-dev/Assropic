@@ -46,7 +46,9 @@ extension BridgeStore {
                 let options = try await loadAccountOptions(account)
                 if !options.prefix.isEmpty { occupied.insert(options.prefix) }
             }
-            document["prefix"] = LocalSubscriptionIdentity.prefix(provider: provider, occupied: occupied)
+            // Join the provider's account pool, so conversations spread over this and the existing accounts.
+            document["prefix"] = AccountPools.prefix(forNew: provider, accounts: accounts,
+                                                     independent: Set(settings.independentAccounts), occupied: occupied)
             document["note"] = "本机 " + (SubscriptionProvider.find(provider)?.title ?? provider)
             document["disabled"] = false
         }

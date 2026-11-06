@@ -31,15 +31,43 @@ struct KiroGatewayRoute: Sendable {
 }
 
 /// A stable key for one client conversation, so every turn of it reaches the same account.
-/// Mirrors kiro2cc's own conversation id: an explicit client session id when present, otherwise
-/// a hash of the system prompt's start and the first user message, which every turn resends
-/// unchanged. Tool lists and the model are left out on purpose: clients change them mid-conversation.
+///
+/// The conversation is identified by its opening: the system prompt's start and the first user
+/// message, which every turn resends unchanged. Tool lists and the model are left out on purpose:
+/// clients change them mid-conversation.
+///
+/// Claude Code sends one session id (header and `metadata.user_id`) for its own turns and for every
+/// subagent it launches. Keying on that id alone held a whole fan-out on one account while the other
+/// accounts sat idle, and gained nothing: a subagent with a fresh context shares no prompt cache with
+/// its parent. So the session id is narrowed by the opening; a subagent forked from its parent's
+/// context opens like the parent and stays with it, keeping the cache it inherited. A message-thread
+/// continue (`thread.type == "continue"`) carries only a delta, so it keeps the bare session id.
+/// `prompt_cache_key` (Codex, OpenCode) already names one conversation and is used as it is.
 enum KiroSessionKey {
-    static func derive(_ body: [String: Any]) -> String? {
-        if let metadata = body["metadata"] as? [String: Any], let user = metadata["user_id"] as? String, !user.isEmpty {
-            return digest("metadata\u{1F}" + user)
+    static func derive(_ body: [String: Any], headers: [String: String] = [:]) -> String? {
+        let opening = opening(body)
+        if let session = claudeCodeSession(body, headers: headers) {
+            let continues = (body["thread"] as? [String: Any])?["type"] as? String == "continue"
+            guard let opening, !continues else { return digest("session\u{1F}" + session) }
+            return digest("session\u{1F}" + session + "\u{1F}" + opening)
         }
         if let cache = body["prompt_cache_key"] as? String, !cache.isEmpty { return digest("cache\u{1F}" + cache) }
+        return opening.map { digest("prompt\u{1F}" + $0) }
+    }
+
+    /// The client session id: the Claude Code header (lower-cased keys), else `metadata.user_id`.
+    static func claudeCodeSession(_ body: [String: Any], headers: [String: String]) -> String? {
+        if let header = headers.first(where: { $0.key.lowercased() == "x-claude-code-session-id" })?.value, !header.isEmpty {
+            return header
+        }
+        if let metadata = body["metadata"] as? [String: Any], let user = metadata["user_id"] as? String, !user.isEmpty {
+            return user
+        }
+        return nil
+    }
+
+    /// The system prompt's first 2000 characters and the first user message; nil without a user message.
+    static func opening(_ body: [String: Any]) -> String? {
         var system = text(body["system"]) + text(body["instructions"])
         var firstUser: String?
         let items = (body["messages"] as? [Any]) ?? (body["input"] as? [Any]) ?? []
@@ -50,7 +78,22 @@ enum KiroSessionKey {
         }
         if firstUser == nil, let input = body["input"] as? String { firstUser = input }
         guard let firstUser, !firstUser.isEmpty else { return nil }
-        return digest("prompt\u{1F}" + String(system.prefix(2000)) + "\u{1F}" + firstUser)
+        return String(system.prefix(2000)) + "\u{1F}" + firstUser
+    }
+
+    /// The Claude Code session id the core should see for this conversation: a UUID derived from the
+    /// session id and the opening, so the core's session affinity places each subagent on its own
+    /// (the core prefers this header over every other session signal). nil leaves the header alone.
+    static func coreSessionHeader(_ body: [String: Any], headers: [String: String]) -> String? {
+        guard let header = headers.first(where: { $0.key.lowercased() == "x-claude-code-session-id" })?.value,
+              !header.isEmpty, let opening = opening(body),
+              (body["thread"] as? [String: Any])?["type"] as? String != "continue" else { return nil }
+        var bytes = Array(SHA256.hash(data: Data(("conversation\u{1F}" + header + "\u{1F}" + opening).utf8)).prefix(16))
+        bytes[6] = (bytes[6] & 0x0F) | 0x50 // version 5 layout: name-based, SHA hash
+        bytes[8] = (bytes[8] & 0x3F) | 0x80
+        let hex = bytes.map { String(format: "%02x", $0) }.joined()
+        let parts = [hex.prefix(8), hex.dropFirst(8).prefix(4), hex.dropFirst(12).prefix(4), hex.dropFirst(16).prefix(4), hex.dropFirst(20)]
+        return parts.map(String.init).joined(separator: "-")
     }
 
     static func text(_ value: Any?) -> String {

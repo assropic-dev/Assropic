@@ -591,6 +591,10 @@ struct AccountsView: View {
     @State private var removingWork: Channel?
     @State private var editingChannel: Channel?
     @State private var deletingChannel: Channel?
+    @State private var verifyingChannel: Channel?
+    /// 选中某个已登录的中转站按钮时，页面只显示这个站点的管理卡片。
+    @State private var relayTab: String?
+    @State private var addingRelay = false
 
     init(initialFamily: SourceFamily? = nil) { _family = State(initialValue: initialFamily) }
 
@@ -654,9 +658,19 @@ struct AccountsView: View {
             }
             familyBar
             loginSession
-            connectedSources
-            addSection
+            if let site = store.settings.relaySites.first(where: { $0.id == relayTab }) {
+                RelaySiteDetailView(siteID: site.id)
+            } else {
+                connectedSources
+                addSection
+            }
         }
+        .onChange(of: store.relayFocus) { _, id in
+            guard let id else { return }
+            relayTab = id
+            store.relayFocus = nil
+        }
+        .sheet(isPresented: $addingRelay) { RelayLoginView(existing: nil).environmentObject(store) }
         .sheet(item: $editing) { account in AccountOptionsView(account: account).environmentObject(store) }
         .sheet(item: $inspecting) { account in AccountModelsView(account: account).environmentObject(store) }
         .sheet(isPresented: $addingCursor) { CursorAccountView(proxyURL: loginProxy, initialProfile: addingCursorProfile).environmentObject(store) }
@@ -664,6 +678,7 @@ struct AccountsView: View {
         .sheet(isPresented: $addingKimiWork) { KimiWorkLoginView().environmentObject(store) }
         .sheet(item: $editingWork) { channel in ChannelEditor(channel: channel).environmentObject(store) }
         .sheet(item: $editingChannel) { channel in ChannelEditor(channel: channel).environmentObject(store) }
+        .sheet(item: $verifyingChannel) { channel in ChannelVerificationView(channelID: channel.id).environmentObject(store) }
         .onAppear { kiroMethod = store.settings.kiroUseOrganization ? "organization" : "builder-id" }
         .confirmationDialog("删除这个订阅账号？", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), titleVisibility: .visible, presenting: removing) { account in
             Button("删除账号", role: .destructive) {
@@ -698,16 +713,31 @@ struct AccountsView: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 10) {
                 familyButton(nil)
+                // 已登录的中转站紧跟“全部”，每站一个按钮，窄窗口下也不会被挤到看不见的地方。
+                ForEach(store.settings.relaySites) { relaySiteButton($0) }
+                if !store.settings.relaySites.isEmpty {
+                    Rectangle().fill(hairline).frame(width: 1, height: 44).padding(.horizontal, 4)
+                }
                 ForEach(SourceFamily.allCases) { familyButton($0) }
+                Button { addingRelay = true } label: {
+                    VStack(spacing: 7) {
+                        Image(systemName: "plus").font(.system(size: 16, weight: .light)).foregroundStyle(accent).frame(width: 30, height: 30)
+                        Text("登录中转站").font(.system(size: 10)).lineLimit(1)
+                    }.frame(width: 76).padding(.vertical, 12)
+                        .background(panel, in: RoundedRectangle(cornerRadius: 12))
+                        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(hairline.opacity(0.6), style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
+                        .contentShape(Rectangle())
+                }.buttonStyle(.plain).disabled(!store.running).help("登录一个 Sub2API 中转站")
+                    .accessibilityIdentifier("relay-site-add")
             }.padding(2)
         }
     }
 
     private func familyButton(_ item: SourceFamily?) -> some View {
-        let isSelected = family == item
+        let isSelected = family == item && relayTab == nil
         let count = connectedCount(in: item)
         let title = item?.title ?? "全部"
-        return Button { family = item } label: {
+        return Button { family = item; relayTab = nil } label: {
             VStack(spacing: 7) {
                 Group {
                     if let image = item?.icon {
@@ -735,6 +765,33 @@ struct AccountsView: View {
             .accessibilityIdentifier("source-family-" + (item?.rawValue ?? "all"))
     }
 
+    /// 每个登录过的中转站一个按钮，点开是这个站点自己的管理卡片。
+    private func relaySiteButton(_ site: RelaySite) -> some View {
+        let isSelected = relayTab == site.id
+        let count = store.settings.channels.filter { $0.relaySiteID == site.id }.count
+        return Button { relayTab = site.id } label: {
+            VStack(spacing: 7) {
+                RelaySiteIcon(site: site).frame(width: 30, height: 30)
+                    .overlay(alignment: .topTrailing) {
+                        if site.needsLogin {
+                            Image(systemName: "exclamationmark.circle.fill").font(.system(size: 12)).foregroundStyle(warning).offset(x: 8, y: -6)
+                        } else if count > 0 {
+                            Text(String(count)).font(.system(size: 9, weight: .semibold)).monospacedDigit()
+                                .foregroundStyle(.white).padding(.horizontal, 5).padding(.vertical, 1.5)
+                                .background(accent, in: Capsule()).offset(x: 10, y: -6)
+                        }
+                    }
+                Text(site.title).font(.system(size: 10, weight: isSelected ? .semibold : .regular)).lineLimit(1)
+            }.frame(width: 76).padding(.vertical, 12)
+                .background(isSelected ? accent.opacity(0.08) : panel, in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(isSelected ? accent : hairline.opacity(0.6), lineWidth: isSelected ? 1.5 : 1))
+                .contentShape(Rectangle())
+        }.buttonStyle(.plain).help(site.title + " · " + site.origin)
+            .accessibilityLabel("中转站 " + site.title + (site.needsLogin ? "，需要重新登录" : (count > 0 ? "，已接入 \(count) 个渠道" : "")))
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
+            .accessibilityIdentifier("relay-site-" + site.id)
+    }
+
     @ViewBuilder private var addSection: some View {
         if let family {
             let presets = Preset.all.filter { family.presetIDs.contains($0.id) }
@@ -744,7 +801,7 @@ struct AccountsView: View {
                     Text("添加 " + family.title).font(.system(size: 16, weight: .semibold))
                     Spacer()
                     if !providers.isEmpty {
-                        Text("同一服务商可添加多个账号，默认轮流使用；优先级高的优先，独立前缀可指定账号。")
+                        Text("同一服务商的多个账号组成账号池：新会话依次分到各账号，同一会话固定在一个账号；优先级高的优先，独立前缀可单独使用某个账号。")
                             .font(.system(size: 11)).foregroundStyle(mutedInk)
                     }
                 }
@@ -765,6 +822,7 @@ struct AccountsView: View {
                         if family.includesKimiWork { Card { kimiWorkControls.frame(height: providerContentHeight) } }
                     }
                 }
+                if family == .custom { RelaySitesCard() }
                 if !presets.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
                         Text(family == .custom ? "第三方中转站" : "使用 API Key").font(.system(size: 13, weight: .semibold))
@@ -1035,6 +1093,7 @@ struct AccountsView: View {
                 HStack(spacing: 8) {
                     Text(channel.name).font(.system(size: 13, weight: .medium))
                     Pill(text: channel.relaySite.isEmpty ? "API Key" : "中转站 · " + channel.relaySite, active: false)
+                    VerificationBadge(channelID: channel.id)
                     if let name = store.publicPrefix(source: "channel:" + channel.id) {
                         Text(name + "/…").font(.system(size: 11, design: .monospaced)).foregroundStyle(accent)
                             .help("对外调用名前缀；内部路由前缀为 " + channel.prefix)
@@ -1053,6 +1112,7 @@ struct AccountsView: View {
             }
             Menu {
                 Button("渠道设置与模型…") { editingChannel = channel }
+                if !channel.isKimiWork { Button("模型核验…") { verifyingChannel = channel } }
                 if !channel.manageURL.isEmpty {
                     Button("打开中转站后台") { store.openManagePage(channel) }
                 }
@@ -1087,7 +1147,7 @@ struct AccountsView: View {
                         Pill(text: "BD 已保存", active: false)
                     }
                 }
-                Text([account.providerTitle, account.statusText, store.publicPrefix(source: "account:" + account.id).map { "调用名 " + $0 + "/…" } ?? (account.prefix.isEmpty ? "账号池" : "前缀 " + account.prefix)].joined(separator: " · "))
+                Text([account.providerTitle, account.statusText, store.publicPrefix(source: "account:" + account.id).map { "调用名 " + $0 + "/…" } ?? store.poolLabel(account)].joined(separator: " · "))
                     .font(.system(size: 11)).foregroundStyle(account.requiresSignIn ? warning : mutedInk)
                     .help(account.name)
                 if !account.statusMessage.isEmpty && (account.requiresSignIn || account.status == "error") {
@@ -1274,8 +1334,8 @@ private struct AccountOptionsView: View {
     private var settingsForm: some View {
         VStack(alignment: .leading, spacing: 14) {
             TextField("备注", text: option(\.note)).textFieldStyle(.roundedBorder)
-            TextField("独立模型前缀（可留空）", text: option(\.prefix)).textFieldStyle(.roundedBorder)
-            Text("设置独立前缀后，这个账号单独成组，对外模型名为“备注前四字/模型名”，可在模型页复制。留空时参与同服务商的账号池。").font(.system(size: 11)).foregroundStyle(mutedInk).lineSpacing(3)
+            TextField("模型前缀（留空加入账号池）", text: option(\.prefix)).textFieldStyle(.roundedBorder)
+            Text("留空或填写账号池的前缀时，这个账号留在同服务商的账号池里：新会话依次分到池里的各个账号，同一会话固定在一个账号，某个账号额度用完时它的会话自动换到其他账号。填写其他前缀后单独成组，只在调用“前缀/模型名”时使用。").font(.system(size: 11)).foregroundStyle(mutedInk).lineSpacing(3)
             HStack {
                 Text("优先级")
                 TextField("0", value: priority, format: .number).textFieldStyle(.roundedBorder).frame(width: 100)

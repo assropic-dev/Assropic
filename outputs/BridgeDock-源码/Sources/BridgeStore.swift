@@ -12,6 +12,8 @@ final class BridgeStore: ObservableObject {
     @Published var models: [ModelItem] = []
     @Published var availableModels: [PublishedModel] = []
     private var rawModels: [ModelItem] = []
+    /// Set while `mergeAccountPools` runs, so its own refresh does not merge again.
+    private var mergingAccountPools = false
     private var modelDefinitions: [String: [String: ModelCapability]] = [:]
     private var modelDefinitionKey = ""
     private var modelDefinitionsLoadedAt = Date.distantPast
@@ -33,6 +35,17 @@ final class BridgeStore: ObservableObject {
     var workAppliedFingerprint = ""
     var workSyncing = false
     var workRefreshAttempts: [String: Date] = [:]
+    /// 登录中转站：每站的状态文字与账户概况，以及刷新、巡检的节流记录。
+    @Published var relayStatus: [String: String] = [:]
+    @Published var relayAccounts: [String: RelayAccount] = [:]
+    /// 设为某个站点 ID 时，账号页切到这个站点的管理卡片（登录成功后使用）。
+    @Published var relayFocus: String?
+    var relaySyncing = false
+    var relayRefreshing: Set<String> = []
+    var relayAttempts: [String: Date] = [:]
+    /// 定时核验：正在核验的渠道，以及各渠道已读入的核验记录。
+    @Published var verifyingChannels: Set<String> = []
+    @Published var verificationLogs: [String: VerificationLog] = [:]
     @Published var testResult = ""
     @Published var testing = false
     @Published var testReport: ModelTestReport?
@@ -426,6 +439,7 @@ final class BridgeStore: ObservableObject {
     func refresh() async {
         guard running else { return }
         await synchronizeKimiWork()
+        await synchronizeRelaySites()
         do {
             async let modelData = request("/v1/models", management: false, timeout: 5, internalCore: true)
             async let accountData = request("/v8/management/credentials", timeout: 5)
@@ -454,6 +468,7 @@ final class BridgeStore: ObservableObject {
             }
             accounts = rows.map(Account.init)
                 .filter { !["api-key", "apikey"].contains($0.provider) }
+            if await mergeAccountPools() { return } // the settings update refreshes again
             await updateAccountRests()
             // Plugin vendors register their definitions after startup; retry missing sets.
             let definitionKey = Set(accounts.map(\.provider) + modelOwners).sorted().joined(separator: ",")
@@ -476,6 +491,60 @@ final class BridgeStore: ObservableObject {
         } catch {
             status = "本地连接异常，请检查服务"
         }
+    }
+
+    /// Puts accounts of one subscription that ended up on different automatic prefixes (older versions
+    /// gave every local import its own, and OAuth logins none) on one prefix, so they form one pool in
+    /// the core. Published models and verified contexts follow. Returns true when settings were updated,
+    /// which refreshes again.
+    private func mergeAccountPools() async -> Bool {
+        let moves = AccountPools.plan(accounts: accounts, independent: Set(settings.independentAccounts))
+        guard !moves.isEmpty, !busy, accountOperation == nil, !mergingAccountPools else { return false }
+        mergingAccountPools = true
+        defer { mergingAccountPools = false }
+        var owners: [String: Set<String>] = [:]
+        for model in rawModels where !model.id.contains("/") { owners[model.id, default: []].insert(model.owner) }
+        let providers = Dictionary(accounts.map { ($0.name, $0.provider) }, uniquingKeysWith: { first, _ in first })
+        var merged: [AccountPools.Move] = []
+        for move in moves {
+            do {
+                _ = try await object("/v8/management/credentials/fields", method: "PATCH", value: ["name": move.account, "prefix": move.to])
+                merged.append(move)
+            } catch {
+                record("合并账号池失败 · " + move.account + " · " + redacted(error.localizedDescription), failed: true)
+            }
+        }
+        guard !merged.isEmpty else { return false }
+        // Publish only the prefixes that actually moved. If the core rejected every patch, keep the
+        // previous state intact; otherwise a retry could leave published IDs pointing at no route.
+        var candidate = settings
+        if let ids = candidate.publishedModelIDs {
+            candidate.publishedModelIDs = AccountPools.remap(ids, moves: merged, owners: owners, providers: providers)
+        }
+        candidate.verifiedContexts = AccountPools.remap(candidate.verifiedContexts, moves: merged, owners: owners, providers: providers)
+        if candidate.publishedModelIDs != settings.publishedModelIDs || candidate.verifiedContexts != settings.verifiedContexts {
+            do {
+                try persist(candidate)
+                settings = candidate
+            } catch {
+                // The core has already accepted the prefix patches; roll them back if the local state
+                // cannot be written, so the next refresh sees a consistent pair again.
+                for move in merged {
+                    _ = try? await object("/v8/management/credentials/fields", method: "PATCH",
+                                           value: ["name": move.account, "prefix": move.from])
+                }
+                report(error)
+                return false
+            }
+        }
+        for (group, items) in Dictionary(grouping: merged, by: \.group) {
+            let title = accounts.first { AccountPools.group($0) == group }?.providerTitle ?? group
+            let target = items[0].to.isEmpty ? "无前缀" : "前缀 " + items[0].to
+            record("已把 \(items.count) 个 \(title) 账号并入同一账号池（\(target)），新会话会分到池里的各个账号，同一会话固定在一个账号")
+        }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        await refresh()
+        return true
     }
 
     private func loadCursorModelCatalogs() async {
@@ -550,6 +619,20 @@ final class BridgeStore: ObservableObject {
 
     /// 公开 ID 不再带渠道前缀，界面改为显示渠道自身的路由前缀。
     func publicPrefix(source: String) -> String? { nil }
+
+    /// How an account takes part in routing, for its row in the account list.
+    func poolLabel(_ account: Account) -> String {
+        let named = account.prefix.isEmpty ? "" : " · 前缀 " + account.prefix
+        guard let group = AccountPools.group(account) else { return account.prefix.isEmpty ? "账号池" : "前缀 " + account.prefix }
+        let independent = Set(settings.independentAccounts)
+        let pool = AccountPools.members(group, in: accounts.filter { !$0.disabled }, independent: independent)
+            .filter { $0.prefix == account.prefix }
+        if pool.count >= 2, pool.contains(where: { $0.name == account.name }) { return "账号池 \(pool.count) 个账号" + named }
+        if independent.contains(account.name) || !AccountPools.isAutomatic(account.prefix, base: AccountPools.base(account)) {
+            return "独立账号" + named
+        }
+        return account.prefix.isEmpty ? "账号池" : "前缀 " + account.prefix
+    }
 
     /// 对合并模型的每个供应商、每个思考档位（及快速模式）各发一条小请求，核对实际落到的供应商与生效档位。
     func startParameterProbe(_ publicID: String) {
@@ -869,7 +952,9 @@ final class BridgeStore: ObservableObject {
                 let options = try await loadAccountOptions(account)
                 if !options.prefix.isEmpty { occupied.insert(options.prefix) }
             }
-            credential["prefix"] = LocalSubscriptionIdentity.prefix(provider: profile.prefix, occupied: occupied)
+            credential["prefix"] = AccountPools.prefix(forNew: CursorAccountProfile.providerID, profile: profile.rawValue,
+                                                       accounts: accounts, independent: Set(settings.independentAccounts),
+                                                       occupied: occupied)
         }
         let data = try jsonData(credential)
         _ = try await request("/v8/management/credentials?name=" + Self.query(name), method: "POST", body: data)
@@ -879,8 +964,20 @@ final class BridgeStore: ObservableObject {
 
     func saveAccountOptions(_ account: Account, options: AccountOptions) async throws {
         guard running, !busy, accountOperation == nil else { throw BridgeError.message("请等待当前操作完成。") }
-        let fields = try options.fields(name: account.name)
-        let prefix = fields["prefix"] as? String ?? ""
+        var fields = try options.fields(name: account.name)
+        var prefix = fields["prefix"] as? String ?? ""
+        // An empty prefix, or the pool's own, keeps the account in its provider's pool; any other prefix
+        // makes it independent, and pool merging leaves it alone from then on.
+        var independent = Set(settings.independentAccounts)
+        if let pool = AccountPools.joinPrefix(for: account, accounts: accounts, independent: independent) {
+            if prefix.isEmpty || prefix == pool {
+                prefix = pool
+                independent.remove(account.name)
+            } else {
+                independent.insert(account.name)
+            }
+            fields["prefix"] = prefix
+        }
         guard prefix.isEmpty || !settings.channels.contains(where: { $0.prefix == prefix }) else {
             throw BridgeError.message("此前缀已被 API 渠道使用，请换一个账号前缀。")
         }
@@ -891,6 +988,13 @@ final class BridgeStore: ObservableObject {
         defer { accountOperation = nil }
         _ = try await object("/v8/management/credentials/fields", method: "PATCH", value: fields)
         record("已更新账号设置 · " + account.email)
+        if independent != Set(settings.independentAccounts) {
+            var candidate = settings
+            candidate.independentAccounts = independent.sorted()
+            accountOperation = nil
+            try await update(candidate) // refreshes as well
+            return
+        }
         await refresh()
     }
 
@@ -1087,6 +1191,14 @@ final class BridgeStore: ObservableObject {
         var next = settings
         next.lastOpenedAgent = agent
         next.lastOpenedProject = project
+        try persist(next)
+        settings = next
+    }
+
+    /// 中转站登录信息不进内核配置，只写 state.json，不必等其他配置操作结束。
+    func saveRelaySites(_ sites: [RelaySite]) throws {
+        var next = settings
+        next.relaySites = sites
         try persist(next)
         settings = next
     }

@@ -1,4 +1,4 @@
-BridgeDock 桥接台 1.4.21
+BridgeDock 桥接台 1.4.22
 
 面向 Apple Silicon Mac 的本地模型反代桌面应用。
 界面使用 SwiftUI，内置 CLIProxyAPI 8.0.53、Kiro Plugin 0.1.1 与 kiro2cc-proxy 3.5.1。
@@ -8,6 +8,7 @@ BridgeDock 桥接台 1.4.21
 
 • 官方 API Key、Coding Plan Key、第三方中转站的新增、编辑、启停和删除。
 • 接管中转站的“导入 CC Switch”按钮，自动识别并直接导入为 BD 渠道，后台入口保留在中转站。
+• 登录 Sub2API 中转站：内嵌网页登录一次，BD 独立续期；随时新建 Key 并一键接入，Key 失效自动换新，定时核验模型真伪。
 • Claude、Codex、Cursor、Kimi 国内/国际、Grok Build / xAI 与 Kiro 的账号登录入口。
 • Cursor 独立账号入口，支持账号 Key、邮箱----user_…::令牌、会话 Cookie 或 JWT。
   会话先经 Cursor 官方接口验证身份再保存；可使用账号有权限的第三方模型。
@@ -49,7 +50,7 @@ BridgeDock 桥接台 1.4.21
    credentials/auth/config 文件（Kimi Code 登录 token 会按 config.toml 中的 OAuth 引用读取
    ~/.kimi-code/credentials/，也支持 KIMI_CODE_HOME）读取；找不到或格式不匹配时
    明确提示，不要求覆盖粘贴凭据。原始登录文件只读，不会被修改。
-   首次连接分别分配 claude、gpt、kiro 前缀；被占用时自动添加序号。
+   首次连接分别分配 claude、gpt、kiro 前缀；同一服务商再连接的账号加入已有账号池（共用前缀）。
    能识别为同一账号时，更新保留前缀、备注、代理与停用状态；无法确认身份时会明确提示。
    原始客户端登录文件不会被修改。规范化后的令牌会复制到 BridgeDock 私有数据目录
    的 accounts/，账号行显示“BD 已保存”；后续模型调用、额度刷新和凭据续期由 BD 自己完成，
@@ -300,7 +301,8 @@ Grok Bot 支持通过 Cursor 网页授权自动保存凭据，也支持账户 Da
 https://cursor.com/docs/cli/reference/authentication
 
 账号可以搜索、筛选、查看其模型，设置备注、独立模型前缀、优先级与出站代理。
-同级账号默认轮询；高优先级优先选择。不同账号需要指定调用时请设不同前缀。
+同一服务商的账号组成账号池，新对话依次分到各账号；高优先级优先选择。需要单独调用某个账号时，
+给它填一个不同的前缀（独立账号）；清空前缀即回到账号池。
 启停与删除只作用于选中凭据；删除前仍保留本机恢复副本。
 
 Codex、Kiro 和 ZCode 支持针对已有凭据重新授权。Claude、Kimi、Grok 的再次登录
@@ -532,11 +534,62 @@ Grok Build → xAI，OpenCode 等 → Chat Completions）。链接不带模型�
 xcrun swiftc -swift-version 5 Sources/Models.swift Sources/SubscriptionAccounts.swift Sources/Quotas.swift Sources/CCSwitchLink.swift Tests/CCSwitchLinkTests.swift -o /tmp/bridgedock-ccswitch-tests && /tmp/bridgedock-ccswitch-tests
 
 
+登录中转站与模型核验
+
+账号与渠道 → 自定义 → “登录中转站”。目前支持 Sub2API 站点（AIportX、Noot 等）。
+1. 填写站点后台地址。BD 先读取 /api/v1/settings/public 确认是 Sub2API，再在内嵌网页打开它的登录页。
+   密码、QQ、微信、验证码等任何登录方式都在站点自己的页面完成，密码不经过 BD。
+   网页使用独立的临时会话；登录成功后 BD 取走 auth_token 与 refresh_token，存入数据目录 relay-sites/（权限 600），
+   state.json 只记站点地址、邮箱和用户 ID。调用后台接口时沿用登录网页的 User-Agent。
+2. 登录令牌 24 小时有效。剩余不到 2 小时时 BD 调用 /api/v1/auth/refresh 续期；刷新令牌每次轮换，先落盘再使用，
+   同一站点同时只刷新一次。刷新被拒（401）时站点标为“需重新登录”，已接入的 Key 不受影响。
+3. “管理 Key”列出站点全部 Key 与可用分组：可选分组新建 Key（可设额度上限）并直接接入，也可把已有 Key 接入。
+   分组平台决定协议：Claude 走 Anthropic Messages（地址去掉 /v1），GPT 走 Responses，Grok 走 xAI；Gemini 暂不支持。
+   接口地址取站点公布的 api_base_url，模型取分组模型列表；同一 Key 再次接入时更新原渠道，保留别名。
+4. 每 10 分钟刷新余额与今日消费，并检查已接入的 Key：Key 在站点被删除，或 BD 新建（名称以 BridgeDock 开头）的 Key
+   停用、到期、额度用完时，在原分组新建一个并替换渠道里的 Key（可在站点“更多”菜单关闭）。用户自己的 Key 失效只提示。
+5. 退出登录会调用站点 /auth/logout 注销这次会话并删除本地令牌，已接入的渠道保留。
+
+渠道“管理”菜单 → “模型核验…”可立即核验或设定每 6 / 12 / 24 小时、每周自动核验，任意 API 渠道都能用。
+每次对每个模型发 3–4 个小请求（约 1 万输入 token），同一时间只核验一个渠道：
+• 响应格式：Messages / Responses 的原生字段（type、object、usage、ID 前缀），以及返回的模型标识。
+• 分词指纹：加入约 4,500 token 固定文本前后的输入 token 差值。差值由分词器决定，用差值可排除站点附加的系统提示。
+  BD 里有同名模型的官方订阅时，经本地网关测一次官方差值作参照（7 天内复用）；没有时与首次测得的基准比较。
+• 提示缓存：同一长前缀重复请求应命中缓存（cache_read_input_tokens / cached_tokens）。
+• thinking 签名（Anthropic）或推理 token（Responses）。
+• 计费核对（登录中转站接入的渠道）：读取该 Key 的站点计费记录，与接口返回的 usage 逐条比对。
+结论：任一项失败为“确认异常”，有提醒为“可疑”，否则“可信”；调用失败为“无法检测”。
+结果记在数据目录 verification/，渠道行显示最近结论；可选“确认异常时自动停用渠道”。
+没有一项检测能单独证明真伪，结论由多项证据合成；站点关闭缓存等正常配置也可能触发“可疑”。
+
+xcrun swiftc -swift-version 5 Sources/Models.swift Sources/SubscriptionAccounts.swift Sources/Quotas.swift Sources/CCSwitchLink.swift Sources/ModelPublishing.swift Sources/ModelDiagnostics.swift Sources/RelaySites.swift Sources/ModelVerification.swift Tests/RelaySitesTests.swift -o /tmp/bridgedock-relay-tests && /tmp/bridgedock-relay-tests
+
+
+账号池与多账号并行（1.4.22）
+
+同一订阅的多个账号组成一个账号池，在 Cursor、Claude Code、Codex CLI 等任何工具里都按对话分配：
+新对话依次分到 1 号、2 号、3 号账号，再回到 1 号……；同一对话一直留在它的账号上，提示词缓存持续命中；
+某个账号额度用完时，只有它上面的对话换到其他账号，客户端感觉不到。
+• 池按上游划分：Claude、GPT / Codex、Kimi 国内、Kimi 国际、Grok、ZCode 国内 / 国际、Cursor、Grok Bot 各自一池。
+  Kiro 每个账号独立进程，由网关按同样的规则分配（见下方“Kiro 账号池”）。
+• 账号池共用一个模型前缀（例如 gpt/…）。旧版本给每个本机导入的账号分配了独立前缀（gpt、gpt-2…），
+  合并模型时只会用到第一个账号，新账号的模型也不会进入开放列表。1.4.22 启动后自动把这类账号并入同一账号池，
+  开放模型列表和长上下文检测结果随之迁移，活动记录里会写明合并了哪些账号。
+• 自定义前缀（不是“服务商名”或“服务商名-数字”）的账号，以及在账号设置里填了其他前缀的账号，保持独立，
+  只在调用“前缀/模型名”时使用。账号行显示“账号池 N 个账号”或“独立账号”。
+• Claude Code 的主对话和它启动的每个子代理共用一个会话标识。网关在转发前按“会话标识 + 对话开头”
+  为每个对话生成独立的会话标识，所以一次并发的多个子代理会分散到池里的不同账号；从主对话 fork 出来的
+  子代理开头相同，仍留在主对话的账号上，继续使用它的缓存。Kiro 账号池使用同样的对话划分。
+
+xcrun swiftc -swift-version 5 Sources/Models.swift Sources/SubscriptionAccounts.swift Sources/LocalSubscriptionIdentity.swift Sources/AccountPools.swift Sources/ModelPublishing.swift Sources/ModelGateway.swift Sources/KiroRouting.swift Sources/KiroRuntime.swift Tests/AccountPoolsTests.swift -o /tmp/bridgedock-pool-tests && /tmp/bridgedock-pool-tests
+
+
 会话粘性、限流与冷却（1.4.21）
 
 同一个对话固定使用同一个账号或同一把 Key，上游的提示词缓存可以持续命中，省额度、首字更快。
 内核按 Claude Code / Codex / OpenCode 的会话标识、prompt_cache_key 或首条消息识别对话；
-子代理跟随父对话的账号。新对话仍在账号之间轮流分配。
+新对话在账号之间依次分配。Claude Code 的子代理按各自的对话分配（见下方“账号池”），
+Codex 等声明了父会话的子代理跟随父对话的账号。
 • 临时错误（408、5xx、空响应）只让这一次请求换号，账号休息 15 秒（内核默认 60 秒），
   同一账号上的其他对话不会被一起挪走。额度和认证错误才让对话换到别的账号。
 • 流式响应在长时间思考时每 15 秒发送 SSE 心跳；还没输出任何内容前失败，会静默重试一次。

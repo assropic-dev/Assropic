@@ -128,9 +128,31 @@ struct KiroRuntimeTests {
         check(KiroSessionKey.derive(["messages": [["role": "user", "content": [["type": "text", "text": "修复登录页"]]]], "system": "You are Cursor."])
               == KiroSessionKey.derive(["messages": [["role": "user", "content": "修复登录页"]], "system": [["type": "text", "text": "You are Cursor."]]]),
               "Anthropic-style string and block content give the same key")
-        check(KiroSessionKey.derive(["metadata": ["user_id": "user_x_session_1"], "messages": [["role": "user", "content": "a"]]])
-              == KiroSessionKey.derive(["metadata": ["user_id": "user_x_session_1"], "messages": [["role": "user", "content": "b"]]]),
-              "an explicit client session id wins over the prompt")
+        // Claude Code: one session id for the main agent and every subagent; the opening tells them apart.
+        let main: [String: Any] = ["metadata": ["user_id": "session_1"], "messages": [["role": "user", "content": "主任务"]]]
+        let mainLater: [String: Any] = ["metadata": ["user_id": "session_1"], "messages": [["role": "user", "content": "主任务"],
+                                         ["role": "assistant", "content": "好"], ["role": "user", "content": "继续"]]]
+        let subagent: [String: Any] = ["metadata": ["user_id": "session_1"], "messages": [["role": "user", "content": "子任务：查日志"]]]
+        check(KiroSessionKey.derive(main) == KiroSessionKey.derive(mainLater), "every turn of the main agent keeps its key")
+        check(KiroSessionKey.derive(main) != KiroSessionKey.derive(subagent), "a subagent with its own context gets its own key")
+        check(KiroSessionKey.derive(main) != KiroSessionKey.derive(["metadata": ["user_id": "session_2"], "messages": [["role": "user", "content": "主任务"]]]),
+              "the same opening in another session is another conversation")
+        check(KiroSessionKey.derive(main, headers: ["x-claude-code-session-id": "header-1"])
+              == KiroSessionKey.derive(["metadata": ["user_id": "other"], "messages": [["role": "user", "content": "主任务"]]], headers: ["x-claude-code-session-id": "header-1"]),
+              "the Claude Code header wins over metadata.user_id")
+        var continued = subagent; continued["thread"] = ["type": "continue"]
+        var continuedLater = mainLater; continuedLater["thread"] = ["type": "continue"]
+        check(KiroSessionKey.derive(continued) == KiroSessionKey.derive(continuedLater) && KiroSessionKey.derive(continued) != nil,
+              "a message-thread continue carries only a delta and keeps the bare session key")
+        let coreHeader = KiroSessionKey.coreSessionHeader(main, headers: ["x-claude-code-session-id": "81c25b11-15e2-4d91-bc2a-e30fce335f96"])
+        check(coreHeader != nil && coreHeader == KiroSessionKey.coreSessionHeader(mainLater, headers: ["X-Claude-Code-Session-Id": "81c25b11-15e2-4d91-bc2a-e30fce335f96"]),
+              "the core sees one stable session id per conversation")
+        check(coreHeader != KiroSessionKey.coreSessionHeader(subagent, headers: ["x-claude-code-session-id": "81c25b11-15e2-4d91-bc2a-e30fce335f96"]),
+              "and another one per subagent")
+        check(coreHeader?.range(of: "^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", options: .regularExpression) != nil,
+              "the derived session id keeps the UUID shape Claude Code sends")
+        check(KiroSessionKey.coreSessionHeader(main, headers: [:]) == nil && KiroSessionKey.coreSessionHeader(continued, headers: ["x-claude-code-session-id": "s"]) == nil,
+              "without the header, or for a thread continue, the header is left alone")
         check(KiroSessionKey.derive(["messages": [system]]) == nil && KiroSessionKey.derive(["messages": []]) == nil,
               "a body without a user message has no conversation key")
         check(key?.count == 16, "the key is a short digest and keeps nothing of the prompt")

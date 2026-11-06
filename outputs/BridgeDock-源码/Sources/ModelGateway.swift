@@ -554,7 +554,7 @@ private final class GatewayClient: NSObject, URLSessionDataDelegate, @unchecked 
         guard method == "POST", Self.inferencePaths.contains(path) else { error(405, "该接口不支持此方法。"); return }
         guard var object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any], let model = object["model"] as? String else { error(400, "请提供 JSON model 字段。"); return }
         let route: PublishedModel
-        let forwardedHeaders: [String: String]
+        var forwardedHeaders: [String: String]
         do {
             var parameters = try ModelGateway.parameterSelection(headers["x-bridgedock-parameters"])
             let isCursorClient = (headers["user-agent"] ?? "").lowercased().hasPrefix("cursor/")
@@ -574,6 +574,12 @@ private final class GatewayClient: NSObject, URLSessionDataDelegate, @unchecked 
             object = ModelGateway.droppingEmptyAssistantMessages(object)
             forwardedHeaders = try ModelGateway.routedHeaders(headers, route: route, parameters: parameters)
         } catch { self.error(400, error.localizedDescription); return }
+        // The core keys session affinity on Claude Code's session id, which a session's subagents share;
+        // give each conversation its own, so a fan-out spreads over the account pool (see KiroSessionKey).
+        if let conversation = KiroSessionKey.coreSessionHeader(object, headers: headers) {
+            forwardedHeaders = forwardedHeaders.filter { $0.key.lowercased() != "x-claude-code-session-id" }
+            forwardedHeaders["X-Claude-Code-Session-Id"] = conversation
+        }
         let kiro = ModelGateway.kiroTarget(for: route, route: configuration.kiro)
         // kiro2cc serves chat, messages and responses only; other paths stay on the core.
         let kiroPaths: Set<String> = ["/v1/chat/completions", "/v1/messages", "/v1/messages/count_tokens", "/v1/responses"]
@@ -582,7 +588,7 @@ private final class GatewayClient: NSObject, URLSessionDataDelegate, @unchecked 
             object["model"] = kiro.model
             guard let data = try? JSONSerialization.data(withJSONObject: object) else { error(400, "无效的 JSON 请求体。"); return }
             if let coreBody { kiroFallback = (target, forwardedHeaders, coreBody) }
-            kiroAttempt = KiroAttempt(workers: kiro.workers, session: KiroSessionKey.derive(object), path: target, headers: headers, body: data)
+            kiroAttempt = KiroAttempt(workers: kiro.workers, session: KiroSessionKey.derive(object, headers: headers), path: target, headers: headers, body: data)
             sendToKiro()
             return
         }

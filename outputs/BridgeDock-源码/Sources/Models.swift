@@ -88,6 +88,14 @@ struct Channel: Codable, Identifiable, Equatable {
     /// Per upstream model ID, as reported by the provider's /models when last queried.
     var capabilities: [String: ModelCapability] = [:]
     var workModels: [String: KimiWorkModel] = [:]
+    /// 通过“登录中转站”接入时记录站点和 Key 的 ID，用于自动换 Key 与计费核对。
+    var relaySiteID = ""
+    var relayKeyID = 0
+    var relayGroupID = 0
+    /// 定时核验：间隔小时数（0 为关闭）、要核验的上游模型（空则取第一个）、确认异常时是否自动停用。
+    var verifyHours = 0
+    var verifyModels: [String] = []
+    var verifyAutoDisable = false
     var isKimiWork: Bool { ["kimi-work", "kimi-work-desktop"].contains(credentialSource) }
 
     var models: [[String: String]] {
@@ -151,6 +159,8 @@ struct Channel: Codable, Identifiable, Equatable {
                 throw BridgeError.message("中转站管理页请填写完整的 HTTP(S) 地址，也可以留空。")
             }
         }
+        value.verifyHours = max(0, min(168, verifyHours))
+        value.verifyModels = verifyModels.filter { name in value.models.contains { $0["name"] == name } }
         if value.balanceMode == .custom {
             guard value.balancePath.hasPrefix("/"), !value.balancePath.hasPrefix("//"), !value.balancePath.contains("#") else {
                 throw BridgeError.message("自定义余额接口请填写同一服务商下以 / 开头的路径。")
@@ -929,6 +939,11 @@ struct AppSettings: Codable {
     var verifiedContexts: [String: [Int]] = [:]
     /// 把中转站“导入 CC Switch”按钮发出的 ccswitch:// 链接交给 BridgeDock 打开。
     var handlesImportLinks = true
+    /// Accounts the user gave their own prefix in account settings: they keep their own route instead of
+    /// joining their provider's account pool (see `AccountPools`).
+    var independentAccounts: [String] = []
+    /// 在 BridgeDock 内嵌网页登录过的 Sub2API 中转站；登录令牌单独保存在 relay-sites/。
+    var relaySites: [RelaySite] = []
 
     /// Account selection in the core when several credentials serve one model.
     /// - Session affinity keeps a conversation (Claude Code / Codex / OpenCode session headers,
@@ -1022,6 +1037,12 @@ extension Channel {
         manageURL = try c.decodeIfPresent(String.self, forKey: .manageURL) ?? ""
         capabilities = (try? c.decodeIfPresent([String: ModelCapability].self, forKey: .capabilities)) ?? [:]
         workModels = (try? c.decodeIfPresent([String: KimiWorkModel].self, forKey: .workModels)) ?? [:]
+        relaySiteID = (try? c.decodeIfPresent(String.self, forKey: .relaySiteID)) ?? ""
+        relayKeyID = (try? c.decodeIfPresent(Int.self, forKey: .relayKeyID)) ?? 0
+        relayGroupID = (try? c.decodeIfPresent(Int.self, forKey: .relayGroupID)) ?? 0
+        verifyHours = (try? c.decodeIfPresent(Int.self, forKey: .verifyHours)) ?? 0
+        verifyModels = (try? c.decodeIfPresent([String].self, forKey: .verifyModels)) ?? []
+        verifyAutoDisable = (try? c.decodeIfPresent(Bool.self, forKey: .verifyAutoDisable)) ?? false
     }
 }
 
@@ -1045,6 +1066,8 @@ extension AppSettings {
         lastOpenedProject = try c.decodeIfPresent(String.self, forKey: .lastOpenedProject) ?? ""
         verifiedContexts = (try? c.decodeIfPresent([String: [Int]].self, forKey: .verifiedContexts)) ?? [:]
         handlesImportLinks = try c.decodeIfPresent(Bool.self, forKey: .handlesImportLinks) ?? d.handlesImportLinks
+        independentAccounts = (try? c.decodeIfPresent([String].self, forKey: .independentAccounts)) ?? []
+        relaySites = (try? c.decodeIfPresent([RelaySite].self, forKey: .relaySites)) ?? []
     }
 }
 
@@ -1169,4 +1192,49 @@ func tomlQuote(_ text: String) -> String {
     let data = try! JSONSerialization.data(withJSONObject: [text], options: [.withoutEscapingSlashes])
     let array = String(decoding: data, as: UTF8.self)
     return String(array.dropFirst().dropLast())
+}
+
+/// 在 BridgeDock 内嵌网页里登录过的 Sub2API 中转站。
+/// 登录令牌不在 state.json 里，单独保存在数据目录的 relay-sites/（见 `RelaySessionStore`）。
+struct RelaySite: Codable, Identifiable, Equatable {
+    var id = UUID().uuidString.lowercased()
+    /// 后台地址，例如 https://www.aiportx.com。登录、刷新与 Key 管理都走 origin + /api/v1。
+    var origin = ""
+    var name = ""
+    /// 站点公布的模型接口地址（settings/public 的 api_base_url），可能与后台不同域名。
+    var apiBaseURL = ""
+    /// 站点公布的 Logo（只记录 https 地址），用作站点按钮图标。
+    var logoURL = ""
+    var version = ""
+    var email = ""
+    var userID = 0
+    var proxyURL = ""
+    /// 登录网页的 User-Agent；之后调用后台接口沿用它，避免令牌按客户端绑定时失效。
+    var userAgent = ""
+    /// 已接入的“BridgeDock-”Key 被删、停用、到期或额度用完时，自动在原分组新建一个并替换。
+    var autoReplaceKeys = true
+    var needsLogin = false
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = RelaySite()
+        id = try c.decodeIfPresent(String.self, forKey: .id) ?? d.id
+        origin = try c.decodeIfPresent(String.self, forKey: .origin) ?? ""
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+        apiBaseURL = try c.decodeIfPresent(String.self, forKey: .apiBaseURL) ?? ""
+        logoURL = try c.decodeIfPresent(String.self, forKey: .logoURL) ?? ""
+        version = try c.decodeIfPresent(String.self, forKey: .version) ?? ""
+        email = try c.decodeIfPresent(String.self, forKey: .email) ?? ""
+        userID = try c.decodeIfPresent(Int.self, forKey: .userID) ?? 0
+        proxyURL = try c.decodeIfPresent(String.self, forKey: .proxyURL) ?? ""
+        userAgent = try c.decodeIfPresent(String.self, forKey: .userAgent) ?? ""
+        autoReplaceKeys = try c.decodeIfPresent(Bool.self, forKey: .autoReplaceKeys) ?? true
+        needsLogin = try c.decodeIfPresent(Bool.self, forKey: .needsLogin) ?? false
+    }
+
+    var host: String { URLComponents(string: origin)?.host ?? origin }
+    var title: String { name.isEmpty ? host : name }
+    var keysPage: String { origin + "/keys" }
 }

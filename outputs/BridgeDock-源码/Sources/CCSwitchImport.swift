@@ -44,7 +44,7 @@ extension BridgeStore {
     }
 
     /// 已手动挑选过开放模型时，新导入渠道的模型默认也开放，导入后即可在各工具里选用。
-    private func publishModels(of channelID: String) async {
+    func publishModels(of channelID: String) async {
         guard let current = settings.publishedModelIDs else { return }
         let added = availableModels.filter { $0.sourceID == "channel:" + channelID }.map(\.id)
         let next = Set(current).union(added)
