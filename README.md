@@ -44,6 +44,7 @@ Assropic 是面向 Apple Silicon Mac 的本地模型桥接与反代桌面应用�
 | Cursor Agent v1 | Cursor Agent v1 Connect、本地 Cursor 账号和模型目录 | [enderzcx/cursor-agent2api](https://github.com/enderzcx/cursor-agent2api)，许可证与第三方声明见 `Vendor/Cursor-LICENSE`、`Vendor/Cursor-NOTICE` |
 | Kiro Plugin 0.1.1 | Kiro 登录、账号列表、额度和凭据刷新 | [xiaokui-dev/cliproxyapi-kiro-plugin](https://github.com/xiaokui-dev/cliproxyapi-kiro-plugin)，补丁和许可证见 `Vendor/KiroStreamChunks.patch`、`Vendor/Kiro-LICENSE` |
 | kiro2cc-proxy 3.5.1 | Kiro Claude 推理、流式输出、工具调用和 continuation 恢复 | [TsinHzl/kiro2cc-proxy](https://github.com/TsinHzl/kiro2cc-proxy/tree/e5387453c10a87e350fbe2d7c6505a1b128f5445)，许可证和本地补丁见 `Vendor/Kiro2cc-*` |
+| CCBaga | 可选的 Claude 独立环境配套；Assropic 只保存非敏感环境元数据并提供外部应用启动入口 | [liseami/CCBaga](https://github.com/liseami/CCBaga)，上游为 MIT；集成边界和声明见 `Vendor/CCBaga-NOTICE.md` |
 | Kimi Work 参考 | Kimi Work 协议和桌面会话参考 | [keenlin/magpie-plugins](https://github.com/keenlin/magpie-plugins/tree/3e966bb4b5f21b9b3d1cbe6c4d15cca8fbf32fe9/packages/kimi-work)，说明见 `Vendor/KimiWork-NOTICE` |
 | ZCode prompt 数据 | ZCode 兼容提示词字段 | [zai-org/ZCode](https://github.com/zai-org/ZCode/tree/v3.14.3)，提取说明见 `Vendor/ZCode-NOTICE.md` |
 | Cursor 中文语言包 | Cursor 中文界面和补充翻译 | [polang233/cursor-language-pack](https://github.com/polang233/cursor-language-pack)，原包不提交到 Git，构建时按校验值下载 |
@@ -229,6 +230,11 @@ backups 保存修改工具配置前的副本。removed-accounts 保存移除账�
 • CCBaga 模式：本机 Claude 账号按账号名保存独立环境记录，新导入账号使用独立路由前缀，刷新时不自动并入 Claude 账号池。
   每个 Claude 账号可以单独选择“使用 CCBaga 浏览器”或“不使用 CCBaga 浏览器”。该开关只记录本地环境偏好，
   不修改 Claude Desktop / Claude Code，也不读取 CCBaga 的 token、Cookie 或加密 vault。
+
+CCBaga 是独立的上游开源项目，Assropic 的 CCBaga 适配只使用其公开项目作为可选外部配套：
+Assropic 不复制或打包 CCBaga-A / CCBaga-B 的源码、二进制、浏览器配置、Cookie 或加密 vault。
+`Sources/AgentLauncher.swift` 只尝试打开本机已安装的 `CCBaga-A.app`；`CCBagaEnvironment` 保存的只是账号标识、路径、开关、状态和时间等本地元数据。
+CCBaga 的版权和 MIT 许可证归上游项目所有，具体来源与边界见 `Vendor/CCBaga-NOTICE.md`。
 
 本机 Claude 登录导入后，凭据会复制到 Assropic 自己的 accounts/ 目录；退出或切换源 Claude 客户端不会删除这份副本。
 如果来源只有 Claude Desktop 进程中的短期 access token，界面会提示凭据过期后需要重新授权；已存在的 refresh token 不会被短期来源覆盖。
