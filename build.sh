@@ -18,6 +18,7 @@ cp Vendor/cli-proxy-api Vendor/kiro2cc-proxy Vendor/*.dylib "$STAGE/Contents/Res
 cp Vendor/*LICENSE "$STAGE/Contents/Resources/"
 cp Vendor/*NOTICE* "$STAGE/Contents/Resources/"
 cp -R Resources/CursorLocal Resources/AgentIcons "$STAGE/Contents/Resources/"
+cp Resources/Assropic-logo.png "$STAGE/Contents/Resources/"
 # Cursor 中文补丁，源文件在项目根目录的 cursor-zh/。语言包原包必须已经下载好。
 [ -f cursor-zh/vendor/cursor-language-pack-1.1.3.tgz ] || { echo "缺少 cursor-zh/vendor 里的语言包，先运行一次 cursor-zh/install.sh" >&2; exit 1; }
 ditto --norsrc --noextattr cursor-zh "$STAGE/Contents/Resources/CursorZh"

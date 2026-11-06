@@ -84,7 +84,8 @@ struct ContentView: View {
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 11) {
-                Image(systemName: "point.3.filled.connected.trianglepath.dotted").font(.system(size: 26, weight: .medium)).foregroundStyle(accent)
+                AssropicLogoView()
+                    .frame(width: 28, height: 28)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Assropic").font(.system(size: 21, weight: .medium, design: .serif))
                     Text("桥 接 台").font(.system(size: 10, weight: .medium)).foregroundStyle(mutedInk)
@@ -137,6 +138,22 @@ struct ContentView: View {
         default: return nil
         }
         return count > 0 ? count : nil
+    }
+}
+
+private struct AssropicLogoView: View {
+    var body: some View {
+        if let url = Bundle.main.url(forResource: "Assropic-logo", withExtension: "png"),
+           let image = NSImage(contentsOf: url) {
+            Image(nsImage: image)
+                .resizable()
+                .scaledToFit()
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        } else {
+            Image(systemName: "point.3.filled.connected.trianglepath.dotted")
+                .font(.system(size: 26, weight: .medium))
+                .foregroundStyle(accent)
+        }
     }
 }
 
